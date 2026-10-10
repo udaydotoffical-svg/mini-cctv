@@ -16,19 +16,31 @@
 #define STA_PASS ""
 
 // ---------------------------------------------------------------------------
-// Frame sent to the Stick.  240x128 = exactly 15x8 JPEG MCUs (16x16), fits the
-// Stick Plus2 panel (240x135) with no ragged edges and decodes fast.
-// Must be multiples of 16.
+// Picture sent to the Stick: exactly its screen, 240x135.
 // ---------------------------------------------------------------------------
-#define OUT_W        240
-#define OUT_H        128
-#define JPEG_QUALITY 85 // 1..100, higher = sharper + bigger frames (85 ~ 5-12 KB)
+#define OUT_W 240
+#define OUT_H 135
 
 // What the sensor captures before we shrink it to OUT_W x OUT_H. Capturing more
 // pixels than we send and averaging them down gives a much cleaner picture.
 //   FRAMESIZE_VGA  (640x480)  sharper, ~8-12 fps   <- default
 //   FRAMESIZE_QVGA (320x240)  faster, ~15+ fps, softer
 #define CAM_FRAMESIZE FRAMESIZE_VGA
+
+// JPEG quality 1..100. STRIP is the Stick's "Photo" mode (small 240x16 strips);
+// FULL is the whole-frame JPEG for the browser page.
+#define STRIP_JPEG_QUALITY 92
+#define FULL_JPEG_QUALITY  85
+
+// Only bands of the picture that really changed are sent. A band is resent when
+// DELTA_PIX_COUNT pixels moved by more than DELTA_PIX_THRESH (sum of the three
+// channel differences, 0..765), or when the whole band drifted by more than
+// DELTA_MEAN_THRESH on average (0..255, catches slow exposure changes).
+// Raise them if sensor noise makes bands resend on a still scene; lower them if
+// small movements get missed.
+#define DELTA_PIX_THRESH  48
+#define DELTA_PIX_COUNT   8
+#define DELTA_MEAN_THRESH 3
 
 // Sensor tuning. These match the stock CameraWebServer sketch for the
 // ESP32-S3-EYE pinout (vflip on, brightness +1, saturation 0).

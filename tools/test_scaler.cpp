@@ -1,5 +1,7 @@
 // Host test for firmware/mini_cctv/scaler.h  (run under ASan to catch out-of-bounds)
 //   g++ -std=c++17 -O1 -g -fsanitize=address,undefined -I firmware/mini_cctv tools/test_scaler.cpp -o /tmp/test_scaler && /tmp/test_scaler
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -80,6 +82,84 @@ int main() {
             for (int x = 0; x < DW; x++)
                 if (at(out, DW, x, y) != 0x07E0) allGreen = false;
         CHECK("crop excludes the top/bottom bands", allGreen);
+    }
+
+    // 4. RGB565 -> RGB332 dither
+    {
+        auto one = [&](uint16_t px) {
+            auto in = solid(8, 8, px);
+            std::vector<uint8_t> out(64);
+            rgb565ToRgb332Dither(in.data(), out.data(), 8, 8, 0);
+            return out;
+        };
+        auto all = [&](const std::vector<uint8_t> &v, int expect) {
+            for (uint8_t b : v) if (b != expect) return false;
+            return true;
+        };
+        CHECK("dither black -> 0x00", all(one(0x0000), 0x00));
+        CHECK("dither white -> 0xFF", all(one(0xFFFF), 0xFF));
+        CHECK("dither red   -> 0xE0 (RRRGGGBB)", all(one(0xF800), 0xE0));
+        CHECK("dither green -> 0x1C", all(one(0x07E0), 0x1C));
+        CHECK("dither blue  -> 0x03", all(one(0x001F), 0x03));
+
+        // Brightness is preserved on average. Every RGB565 colour on a grey ramp, 8x8 tile;
+        // compared with the 8-bit value the colour actually expands to.
+        bool ok = true;
+        double worst = 0;
+        for (int g6 = 0; g6 < 64; g6++) {
+            int r5 = g6 >> 1;
+            uint16_t px = (uint16_t)((r5 << 11) | (g6 << 5) | r5);
+            int er = (r5 << 3) | (r5 >> 2), eg = (g6 << 2) | (g6 >> 4);
+            auto out = one(px);
+            double r = 0, g = 0, b = 0;
+            for (uint8_t o : out) { r += (o >> 5) * 255.0 / 7; g += ((o >> 2) & 7) * 255.0 / 7; b += (o & 3) * 255.0 / 3; }
+            r /= 64; g /= 64; b /= 64;
+            double e = std::max({std::abs(r - er), std::abs(g - eg), std::abs(b - er)});
+            if (e > worst) worst = e;
+            // with 64 thresholds the tile average is within half a level step of the target
+            if (std::abs(r - er) > 4.6 || std::abs(g - eg) > 4.6 || std::abs(b - er) > 22) ok = false;
+        }
+        char name[96];
+        snprintf(name, sizeof name, "dither keeps average brightness (worst %.1f of 255)", worst);
+        CHECK(name, ok);
+
+        // A band dithers exactly like the same rows of a whole frame (no seams).
+        std::vector<uint8_t> frame((size_t)240 * 135 * 2);
+        for (size_t i = 0; i < (size_t)240 * 135; i++) {
+            uint16_t v = (uint16_t)((i * 2654435761u) >> 16);
+            frame[i * 2] = v >> 8; frame[i * 2 + 1] = v & 0xFF;
+        }
+        std::vector<uint8_t> whole(240 * 135), banded(240 * 135);
+        rgb565ToRgb332Dither(frame.data(), whole.data(), 240, 135, 0);
+        for (int i = 0; i < 9; i++) {
+            int rows = (i == 8) ? 135 - 128 : 16;
+            rgb565ToRgb332Dither(frame.data() + (size_t)i * 16 * 240 * 2, banded.data() + (size_t)i * 16 * 240, 240, rows, i * 16);
+        }
+        CHECK("dithered bands == dithered whole frame", whole == banded);
+    }
+
+    // 5. change detection
+    {
+        const size_t px = 240 * 16;
+        auto a = solid(240, 16, 0x8410);
+        auto b = a;
+        CHECK("identical band: unchanged", !bandChanged(a.data(), b.data(), px, 48, 8, 3));
+        // sensor-noise-sized wobble: 1 pixel in 10 flips by one colour step per channel
+        for (size_t i = 0; i < px; i++) { uint16_t v = 0x8410 + ((i % 10 == 0) ? 0x0821 : 0); b[i * 2] = v >> 8; b[i * 2 + 1] = v & 0xFF; }
+        CHECK("noise-level wobble: unchanged", !bandChanged(a.data(), b.data(), px, 48, 8, 3));
+        // a small object: 12 pixels turn white
+        b = a;
+        for (size_t i = 100; i < 112; i++) { b[i * 2] = 0xFF; b[i * 2 + 1] = 0xFF; }
+        CHECK("small object (12 px): changed", bandChanged(a.data(), b.data(), px, 48, 8, 3));
+        // slow drift: whole band 4 levels brighter (red/blue 5-bit steps)
+        auto c = solid(240, 16, 0x8410 + 0x0000);
+        uint16_t brighter = (uint16_t)((((0x8410 >> 11) + 2) << 11) | (0x8410 & 0x07E0) | ((0x8410 & 0x1F) + 2));
+        auto d = solid(240, 16, brighter);
+        CHECK("global drift: changed", bandChanged(c.data(), d.data(), px, 48, 8, 3));
+        // 5 pixels is below the count threshold
+        b = a;
+        for (size_t i = 100; i < 105; i++) { b[i * 2] = 0xFF; b[i * 2 + 1] = 0xFF; }
+        CHECK("5 stray pixels: unchanged", !bandChanged(a.data(), b.data(), px, 48, 8, 3));
     }
 
     printf(failed ? "\n%d FAILED\n" : "\nall passed\n", failed);
