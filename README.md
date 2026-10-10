@@ -21,7 +21,7 @@ The Stick Plus2 is built around a plain ESP32 (ESP32-PICO-V3-02). That chip has 
 
 ## Camera modes
 
-The mode lives **on the camera** and is saved to flash, so a security service keeps running while the Stick is away and survives a power cut. Change it from the Stick (Camera settings → Mode) or from any browser: `http://192.168.4.1/ctl?mode=2`.
+The mode lives **on the camera** and is saved to flash, so a security service keeps running while the Stick is away and survives a power cut. Change it from the Stick (Settings → Mode) or from any browser: `http://192.168.4.1/ctl?mode=2`.
 
 | Mode | What runs | Needs an SD card |
 |---|---|---|
@@ -39,6 +39,16 @@ Photos and clips can always be started by hand from the Stick, in any mode. The 
 
 Run **JS Interpreter → MiniCCTV.js**. The Stick has two side buttons and the front M5 button. Bruce calls them **UP** (Prev), **DOWN** (Next) and **M5** (Sel).
 
+The screens follow the **Knowura design language**: dark ground with the faint grid, black ink outlines, hard offset shadows (never blurred), cyan for icons and active things, the deep-blue → blue gradient on the selected row, uppercase labels in the Stick's pixel font, key caps for the buttons, and red or green only for problems and results (always with a word or icon).
+
+| | |
+|---|---|
+| ![Main menu](docs/screens/menu_connected.png) | ![Settings](docs/screens/settings.png) |
+| ![Live view](docs/screens/viewer_toast.png) | ![Guard mode](docs/screens/guard.png) |
+| ![Camera mode](docs/screens/mode_picker.png) | ![Problem notice](docs/screens/cannot_connect.png) |
+
+*These are renders of the real app (`tools/ui_preview.js`) with a made-up picture, not photos of a Stick; the panel's own colours will differ a little.*
+
 ### Main menu
 
 | Item | |
@@ -46,12 +56,26 @@ Run **JS Interpreter → MiniCCTV.js**. The Stick has two side buttons and the f
 | **Watch live** | the picture |
 | **Guard mode** | the screen goes (nearly) dark and the Stick listens for motion. On motion it wakes, alerts, shows what's happening, and goes dark again 15 s after things settle |
 | **Photos & clips** | browse what's on the camera's SD card and view it on the Stick |
-| **Camera settings** | mode, filter, night, flip, brightness, timelapse interval, zoom/pan |
-| **Picture: Photo / Fast** | Photo = 16-bit colour, moving areas blink briefly. Fast = 8-bit dithered, never blinks |
-| **Alerts: Off / LED only / Beep + LED** | what the Stick does on motion |
+| **Camera** | filter, night, flip, brightness, zoom/pan: the things you adjust while looking at the picture |
+| **Settings** | what the app and the camera start with (below) |
 | **Exit** | |
 
 While the main menu is open and the Stick is on the camera's WiFi, it still watches for motion (MOTION! screen + alert), so you don't have to be in Guard mode.
+
+### Settings
+
+Main menu → **Settings**. Changes apply straight away and are remembered.
+
+| Row | Choices | Stored |
+|---|---|---|
+| **Auto-record** | On / Off: record a clip for every motion event (it applies in Security mode) | on the camera |
+| **Picture** | **Fast** or **Photo**: the view the live picture starts in. Photo = 16-bit colour, moving areas blink briefly. Fast = 8-bit dithered, never blinks | on the Stick |
+| **Alerts** | Off / LED / Beep+LED: what the Stick does on motion | on the Stick |
+| **Info line** | On / Off: fps and timings on the live picture | on the Stick |
+| **Mode** | Live, Guard, Security, Continuous, Timelapse | on the camera |
+| **Timelapse** | 10 s, 30 s, 1 m, 5 m, 15 m, 1 h | on the camera |
+
+The Stick's choices live in `/MiniCCTV.cfg` on its internal storage (a small JSON file; a damaged or out-of-range file is ignored and the defaults are used). The actions menu in the live viewer can still flip Picture, Info line and Mode on the spot; those are for the current session, only Settings changes the defaults. The camera rows show `...` until the app has talked to the camera once; selecting one connects first. The Stick-side rows work with the camera off.
 
 ### Buttons
 
@@ -64,9 +88,9 @@ While the main menu is open and the Stick is on the camera's WiFi, it still watc
 | Photo / clip playback | back | skip 10 s | menu: play/pause, ±10 s |
 | | **UP + DOWN together: back out of a menu; in the viewer or main menu, quit the app** | | |
 
-The **actions menu** (M5 in the live viewer): Resume, Photo, Record clip / Stop recording, Zoom / Pan, Rewind (DVR), Filter, Night, Mode, Picture, Info line, Main menu.
+The **actions menu** (M5 in the live viewer): Resume, Photo, Record clip / Stop recording, Zoom / Pan, Rewind (DVR), Filter, Night, Mode, Picture, Info, Main menu.
 
-The **info line** at the top of the picture shows the picture mode, updates per second (`still` when nothing changes) and milliseconds spent on the network and drawing (`net/draw`). The right edge has a motion meter (red when the moving area is person-sized), a red `REC` while recording, and an orange `NO SD` when there's no card. Errors show in orange there too.
+The **info line** at the top of the picture shows the picture mode, updates per second (`still` when nothing changes) and milliseconds spent on the network and drawing (`net/draw`). The right edge has a motion meter (cyan; red when the moving area is person-sized), a red `REC` while recording, and a red `NO SD` when there's no card. Errors show in red in the info chip.
 
 ### Alerts
 
@@ -105,13 +129,13 @@ Camera pins default to the ESP32-S3-EYE map (`CAMERA_MODEL_ESP32S3_EYE`, top of 
 
 ### 2. The SD card
 
-Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's SD slot in 1-bit SD_MMC mode on pins **CLK 39, CMD 38, D0 40**, the usual wiring on ESP32-S3 camera boards. **The vendor doesn't publish the OceanLabz SD pins**, so if the Serial Monitor (115200) says `SD: init failed ... CLK=39 CMD=38 D0=40`, check the pins against the board's schematic and set `SD_CLK_PIN`, `SD_CMD_PIN`, `SD_D0_PIN` in `config.h`. A healthy boot prints `SD: ok, 29.7 GB card, 29500 MB free`. SD cards wired over SPI (the XIAO ESP32S3 Sense, for example) are not supported.
+Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's SD slot in 1-bit SD_MMC mode on pins **CLK 39, CMD 38, D0 40**, the wiring the Freenove ESP32-S3-WROOM CAM documents and the ESP32-S3-EYE uses. **The vendor doesn't publish the OceanLabz SD pins**, so if the Serial Monitor (115200) says `SD: init failed ... CLK=39 CMD=38 D0=40`, check the pins against the board's schematic and set `SD_CLK_PIN`, `SD_CMD_PIN`, `SD_D0_PIN` in `config.h`. A healthy boot prints `SD: ok, 29.7 GB card, 29500 MB free`. SD cards wired over SPI (the XIAO ESP32S3 Sense, for example) are not supported.
 
 ### 3. Put the app on the Stick
 
 Copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick's SD card, or upload it through the Bruce WebUI. It joins the camera's WiFi itself. The config block at the top must agree with `config.h` (SSID, password, `OUT_W`/`OUT_H`); if it doesn't, the app says so instead of drawing garbage. It needs a Bruce with the mquickjs interpreter (`drawJpg`/`drawBitmap` taking a `Uint8Array`, `httpFetch` with `responseType: 'binary'`).
 
-**Memory:** the app needs about 59 KB of the interpreter's heap when loaded and about 105 KB at peak while streaming. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
+**Memory:** the app needs about 84 KB of the interpreter's heap when loaded (the pixel icons, the UI toolkit) and about 136 KB at peak while streaming. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
 
 ### Using your router instead
 
@@ -148,7 +172,9 @@ tools/run_tests.sh
 Needs g++, Python 3 with Pillow, and Node; ffmpeg and git/gcc/make are used if present. It runs:
 
 - **C++ tests under AddressSanitizer** (`tools/test_scaler.cpp`, `test_features.cpp`, `test_delta.cpp`, `test_avi.cpp`): scaling, dithering, change detection, zoom/pan, filters, motion detection, the DVR ring buffer, recording rules, the mode table, the band protocol and the AVI writer/reader. `ffprobe` and `ffmpeg` then independently check that a written clip is a valid MJPEG file that decodes and seeks.
-- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 20 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own.
+- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 24 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own. Settings get their own scenarios: auto-record, defaults saved and reloaded, damaged or out-of-range files, storage that throws, and the camera being off.
+- `node tools/mutate.js <golden_dir>` breaks the app 32 different ways, one at a time, and checks that the suite notices each (it does: 32 of 32). A mutant that survives would mean a test that proves nothing.
+- `node tools/ui_preview.js` renders the screens above to `docs/screens/` by running the real app against a software model of Bruce's display (the same 5x7 font and round-rect maths as TFT_eSPI). It also counts anything drawn off-screen.
 - `node tools/mq_footprint.js <mqjs>` measures the app's JS heap use on that engine.
 - `node tools/fake_cam_server.js` serves the fake camera over HTTP so a real Stick can be tried against a laptop (set `CAM_HOST` to the laptop and `JOIN_CAM_WIFI = false`).
 

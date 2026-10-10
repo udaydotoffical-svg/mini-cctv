@@ -11,6 +11,12 @@
 var W = 240;
 var H = 135;
 var CLOCK = 1000000;
+function rgb565(r, g, b) {
+  return ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
+}
+var TITLE_CYAN = rgb565(34, 229, 255);
+var TITLE_RED = rgb565(255, 77, 109);
+var TITLE_GREEN = rgb565(25, 195, 125);
 var FAILED = 0;
 var PASSED = 0;
 
@@ -44,17 +50,42 @@ function check(name, cond, extra) {
   out((cond ? 'PASS ' : 'FAIL ') + name + (extra ? '  ' + extra : ''));
 }
 
+// Strings compare ignoring case: the UI shows titles and chips in capitals.
 function has(list, v) {
-  return list.indexOf(v) >= 0;
-}
-
-function anyText(L, re) {
-  for (var i = 0; i < L.texts.length; i++) {
-    if (re.test(L.texts[i])) {
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] === v) {
+      return true;
+    }
+    if (typeof list[i] === 'string' && typeof v === 'string' && list[i].toUpperCase() === v.toUpperCase()) {
       return true;
     }
   }
   return false;
+}
+
+function ci(re) {
+  return new RegExp(re.source, 'i');
+}
+
+function anyText(L, re) {
+  var r = ci(re);
+  for (var i = 0; i < L.texts.length; i++) {
+    if (r.test(L.texts[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function countText(L, re) {
+  var r = ci(re);
+  var n = 0;
+  for (var i = 0; i < L.texts.length; i++) {
+    if (r.test(L.texts[i])) {
+      n++;
+    }
+  }
+  return n;
 }
 
 function countUrls(L, re) {
@@ -96,8 +127,11 @@ function runApp(opts) {
   var L = {
     texts: [], titles: [], menuDraws: 0, jpgs: [], bitmaps: [], urls: [], tones: [], blinks: 0, irs: [],
     joins: 0, disconnects: 0, brightness: [], restores: 0, fills: 0, ticks: 0, maxTicks: opts.maxTicks || 30000,
-    timeout: false, error: '', fb: new Uint8Array(opts.light ? 1 : W * H), noSignal: 0, jpgCount: 0, bitmapCount: 0
+    timeout: false, error: '', fb: new Uint8Array(opts.light ? 1 : W * H), noSignal: 0, jpgCount: 0, bitmapCount: 0,
+    files: opts.files || {}, writes: 0, icons: 0, gradients: 0
   };
+  var curSize = 1;
+  var curColor = 0;
   var pending = null;
   var connected = !!opts.preconnected;
 
@@ -142,25 +176,49 @@ function runApp(opts) {
         for (var i = 0; i < L.fb.length; i++) { L.fb[i] = 0; }
       }
     },
-    setTextSize: function () {},
-    setTextColor: function () {},
+    setTextSize: function (n) { curSize = n; },
+    setTextColor: function (c) { curColor = c; },
+    // A title is what the UI draws large (size 2) in cyan (screens), red (problems) or green (results).
     drawString: function (t, x, y) {
       if (!opts.light) {
         L.texts.push(t);
       }
-      if (x === 8 && y === 5) {
+      if (curSize === 2 && (curColor === TITLE_CYAN || curColor === TITLE_RED || curColor === TITLE_GREEN)) {
         L.titles.push(t);
-        if (t === 'MiniCCTV') {
+        if (t === 'MINICCTV') {
           L.menuDraws++;
         }
       }
-      if (t === 'No signal') {
+      if (t === 'NO SIGNAL') {
         L.noSignal++;
       }
     },
     drawFillRect: function () {},
     drawFillRoundRect: function () {},
     drawRect: function () {},
+    drawRoundRect: function () {},
+    drawFastHLine: function () {},
+    drawFastVLine: function () {},
+    drawLine: function () {},
+    drawCircle: function () {},
+    drawFillCircle: function () {},
+    drawFillRectGradient: function (x, y, w, h, c1, c2, mode) {
+      L.gradients++;
+      if (mode !== 'h' && mode !== 'v') {
+        throw new Error('drawFillRectGradient: mode must be "h" or "v"');
+      }
+    },
+    // Bruce wants a Uint8Array of exactly ceil(w/8)*h bytes, read from the start of its buffer
+    drawXBitmap: function (x, y, data, w, h, fg) {
+      viewCheck(data, 'drawXBitmap');
+      if (data.length !== ((w + 7) >> 3) * h) {
+        throw new TypeError('drawXBitmap: Bitmap size mismatch, len: ' + data.length + ', expected: ' + (((w + 7) >> 3) * h));
+      }
+      if (typeof fg !== 'number') {
+        throw new TypeError('drawXBitmap: colour missing');
+      }
+      L.icons++;
+    },
     setBrightness: function (v) { L.brightness.push(v); },
     restoreBrightness: function () { L.restores++; L.brightness.push('restore'); },
     drawJpg: function (data, x, y, center) {
@@ -243,8 +301,35 @@ function runApp(opts) {
   var MOCK_audio = { tone: function (f, d) { L.tones.push([f, d]); } };
   var MOCK_notification = { blink: function () { L.blinks++; } };
   var MOCK_ir = { transmitFile: function (p, hide) { L.irs.push(p); return true; } };
+  // Bruce's storage: paths are strings or {fs, path}; reading a file that is not there throws;
+  // write(path, text, 'write') replaces, anything else appends (that is Bruce's default).
+  function spath(p) {
+    return typeof p === 'object' ? p.path : p;
+  }
+  var MOCK_storage = {
+    read: function (p) {
+      if (opts.storageBroken) {
+        throw new Error('storage unavailable');
+      }
+      if (!L.files.hasOwnProperty(spath(p))) {
+        throw new TypeError('storageRead: File: ' + spath(p) + ' does not exist');
+      }
+      return L.files[spath(p)];
+    },
+    write: function (p, data, mode) {
+      if (opts.storageBroken) {
+        throw new Error('storage unavailable');
+      }
+      if (typeof data !== 'string') {
+        return false;
+      }
+      L.files[spath(p)] = mode === 'write' || !L.files.hasOwnProperty(spath(p)) ? data : L.files[spath(p)] + data;
+      L.writes++;
+      return true;
+    }
+  };
 
-  MODS = { display: MOCK_display, keyboard: MOCK_keyboard, wifi: MOCK_wifi, audio: MOCK_audio, notification: MOCK_notification, ir: MOCK_ir };
+  MODS = { display: MOCK_display, keyboard: MOCK_keyboard, wifi: MOCK_wifi, audio: MOCK_audio, notification: MOCK_notification, ir: MOCK_ir, storage: MOCK_storage };
 
   try {
     loadApp();
@@ -263,10 +348,28 @@ function frameEquals(fb, expected) {
   return -1;
 }
 
-// Key helpers: menu items on the main menu are Watch live(0) Guard(1) Photos&clips(2) Camera(3)
-// Picture(4) Alerts(5) Exit(6). 'next' = DOWN, 'prev' = UP, 'sel' = M5.
-function mainThenWatch() {
-  return [{ when: MENU(1), key: 'sel' }];
+// Key helpers: the main menu is Watch live(0) Guard(1) Photos&clips(2) Camera(3) Settings(4) Exit(5);
+// Settings is Auto-record(0) Picture(1) Alerts(2) Info line(3) Mode(4) Timelapse(5) Back(6).
+// 'next' = DOWN, 'prev' = UP, 'sel' = M5, 'esc' = UP+DOWN together.
+function T(name) {
+  return function (l) { return has(l.titles, name); };
+}
+
+// Settings -> Picture -> Fast, back out, and into Watch live
+function toFastWatch() {
+  return toSettings().concat([
+    { when: null, key: 'sel' }, { when: null, key: 'esc' },
+    { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
+    { when: null, key: 'sel' }
+  ]);
+}
+
+// from the first main menu draw to the Settings screen
+function toSettings() {
+  return [
+    { when: MENU(1), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+    { when: null, key: 'sel' }, { when: T('Settings'), key: 'next' }
+  ];
 }
 
 var SCENARIOS = {};
@@ -277,6 +380,8 @@ SCENARIOS.menu_and_exit = function () {
   var L = runApp({ keys: script([{ when: MENU(1), key: 'esc' }]) });
   check('app ran without throwing', L.error === '', L.error);
   check('main menu is shown and UP+DOWN quits it', has(L.titles, 'MiniCCTV') && L.urls.length === 0);
+  // four rows are visible at a time: the header icon plus one per row
+  check('the menu draws its icons and a gradient-selected row', L.icons >= 5 && L.gradients >= 1 && anyText(L, /^Watch live$/) && anyText(L, /^Camera$/));
   check('screen brightness is restored on the way out', L.restores >= 1);
 };
 
@@ -306,12 +411,15 @@ SCENARIOS.watch_fast_mode_is_exact = function () {
   FC.reset({ autoMotion: true });
   var L = runApp({
     keys: script([
-      { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'next' },
-      { when: MENU(5), key: 'sel' },   // Picture: Photo -> Fast
-      { when: MENU(6), key: 'prev' }, { when: MENU(7), key: 'prev' }, { when: MENU(8), key: 'prev' }, { when: MENU(9), key: 'prev' },
-      { when: MENU(10), key: 'sel' },  // Watch live
+      { when: MENU(1), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+      { when: null, key: 'sel' },                    // Settings
+      { when: T('Settings'), key: 'next' },          // -> Picture
+      { when: null, key: 'sel' },                    // Photo -> Fast
+      { when: null, key: 'esc' },                    // back to the main menu (cursor on Settings)
+      { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
+      { when: null, key: 'sel' },                    // Watch live
       { when: function (l) { return l.bitmaps.length >= 45; }, run: function (l) { l.snap = new Uint8Array(l.fb); l.want = FC.expectedFrame(); }, key: 'prev' },
-      { when: MENU(11), key: 'esc' }
+      { when: null, key: 'esc' }
     ])
   });
   check('app ran without throwing', L.error === '', L.error);
@@ -403,28 +511,28 @@ SCENARIOS.action_menu_camera_settings = function () {
   check('night mode toggles', countUrls(L, /\/ctl\?n=1$/) === 1 && FC.state().n === 1);
   check('the mode picker changes the camera mode', countUrls(L, /\/ctl\?mode=1$/) === 1 && FC.state().mode === 1);
   check('the mode picker shows each mode\'s one-line description', anyText(L, /Motion alerts \+ rewind/) || has(L.titles, 'Camera mode'));
-  check('menu labels reflect the camera\'s state afterwards', anyText(L, /^Filter: Night$/) && anyText(L, /^Night: On$/) && anyText(L, /^Mode: Guard$/));
+  // chips are drawn in capitals, row labels are not, so the case tells them apart
+  check('the action menu shows the new filter and mode as chips', L.texts.indexOf('NIGHT') >= 0 && L.texts.indexOf('GUARD') >= 0);
+  check('the active mode is marked in the picker', L.texts.indexOf('ACTIVE') >= 0);
 };
 
 SCENARIOS.timelapse_interval = function () {
   FC.reset({ mode: 2, tl: 60 });
   var L = runApp({
-    keys: script([
-      { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' },
-      { when: MENU(4), key: 'sel' },                                            // Camera settings
-      { when: function (l) { return has(l.titles, 'Camera settings'); }, key: 'sel' },   // Mode: ...
-      { when: function (l) { return has(l.titles, 'Camera mode'); }, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },   // Picture(1) -> Alerts -> Info line -> Mode (4)
+      { when: null, key: 'sel' },                                               // Mode -> picker (connects first)
+      { when: T('Camera mode'), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },                                               // Timelapse mode
-      { when: function (l) { return FC.state().mode === 4; }, key: 'next' },    // back in settings: ...Timelapse: Ns is row 5
-      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+      { when: function (l) { return FC.state().mode === 4; }, key: 'next' },    // back in Settings: Mode -> Timelapse row
       { when: null, key: 'sel' },                                               // cycle the interval
-      { when: function (l) { return FC.state().tl === 300; }, key: 'esc' },     // leave settings
+      { when: function (l) { return FC.state().tl === 300; }, key: 'esc' },     // leave Settings
       { when: MENU(2), key: 'esc' }
-    ])
+    ]))
   });
   check('app ran without throwing', L.error === '', L.error);
   check('choosing Timelapse mode does not touch the interval', countUrls(L, /\/ctl\?mode=4$/) === 1 && countUrls(L, /\/ctl\?tl=/) === 1, '(' + L.urls.filter(function (u) { return /tl=|mode=/.test(u); }).join(' ') + ')');
-  check('the interval has its own row and steps 60 s -> 300 s', FC.state().tl === 300 && anyText(L, /^Timelapse: 60s$/));
+  check('the interval has its own row and steps 60 s -> 300 s', FC.state().tl === 300 && anyText(L, /^1m$/) && anyText(L, /^5m$/));
 };
 
 SCENARIOS.zoom_and_pan = function () {
@@ -519,12 +627,12 @@ SCENARIOS.gallery_photos_and_clips = function () {
     ])
   });
   check('app ran without throwing', L.error === '', L.error);
-  check('the gallery lists photos from the camera', countUrls(L, /\/files\?d=photos$/) === 1 && anyText(L, /^IMG_0041 60K$/) && anyText(L, /^IMG_0040 58K$/));
+  check('the gallery lists photos from the camera, with their sizes', countUrls(L, /\/files\?d=photos$/) === 1 && anyText(L, /^IMG_0041$/) && anyText(L, /^60K$/) && anyText(L, /^IMG_0040$/) && anyText(L, /^58K$/));
   check('opening the second photo asks the camera for exactly that one', countUrls(L, /\/ctl\?photo=IMG_0040.jpg$/) === 1 && countUrls(L, /\/ctl\?photo=IMG_0041.jpg$/) === 0);
-  check('the info line names what is playing', anyText(L, /^IMG_0040.jpg/));
+  check('the info line names what is playing', anyText(L, /^IMG_0040 {3,}$/));
   check('leaving a photo puts the camera back on live', countUrls(L, /\/ctl\?live=1$/) >= 1);
   check('clips list and open the second one', countUrls(L, /\/files\?d=clips$/) === 1 && countUrls(L, /\/ctl\?clip=VID_0002.avi$/) === 1 && countUrls(L, /\/ctl\?clip=VID_0003.avi$/) === 0);
-  check('the clip info line shows position and length', anyText(L, /VID_0002.avi 0:\d\d\/0:48/));
+  check('the clip info line shows position and length', anyText(L, /^VID_0002 0:\d\d\/0:48/));
   check('the playback menu can skip forward 10 s', countUrls(L, /\/ctl\?sk=10$/) === 1);
   check('the camera ends up live again', FC.state().ov === 0);
 
@@ -562,12 +670,31 @@ SCENARIOS.guard_mode = function () {
 
   // a camera in Live mode can't guard: offer to switch it
   FC.reset({ mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Guard needs a mode'); }, key: 'sel' },
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'sel' },
     { when: function (l) { return FC.state().mode === 2 && has(l.brightness, 2); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
-  check('Guard on a Live-mode camera offers to switch it to Security, and does', has(L.titles, 'Guard needs a mode') && FC.state().mode === 2);
+  check('Guard on a Live-mode camera offers to switch it to Security, and does', has(L.titles, 'Arm guard?') && FC.state().mode === 2);
   FC.reset({ mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Guard needs a mode'); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('...or you can say no (mode stays, screen never dimmed)', FC.state().mode === 0 && !has(L.brightness, 2));
+};
+
+SCENARIOS.guard_survives_camera_reboot = function () {
+  // the camera has already seen 5 events; then it reboots (its counter restarts) and sees a new one
+  FC.reset({ mode: 2, mseq: 5 });
+  var L = runApp({
+    keys: script([
+      { when: MENU(1), key: 'next' },
+      { when: MENU(2), key: 'sel' },                                            // Guard mode
+      { when: function (l) { return has(l.brightness, 2) && countUrls(l, /\/m\?s=5$/) >= 2; }, run: function () { FC.state().mseq = 0; } },   // reboot
+      { when: function (l) { return countUrls(l, /\/m\?s=0$/) >= 2; }, run: function () { FC.state().mseq = 1; FC.state().motion = 1; FC.state().lv = 30; } },   // new event
+      { when: function (l) { return l.tones.length >= 1; }, run: function () { FC.state().motion = 0; FC.state().lv = 0; } },
+      { when: function (l) { return countUrls(l, /\/d\?f=j/) > 5; }, key: 'prev' },
+      { when: MENU(2), key: 'esc' }
+    ])
+  });
+  check('app ran without throwing', L.error === '' && !L.timeout, L.error);
+  check('guard follows the counter back down after the reboot', countUrls(L, /\/m\?s=5$/) >= 2 && countUrls(L, /\/m\?s=0$/) >= 2);
+  check('...and the first event after the reboot still raises the alarm', L.tones.length >= 1 && L.blinks >= 1, '(' + L.tones.length + ' tones)');
 };
 
 SCENARIOS.alerts_in_viewer_and_menu = function () {
@@ -611,36 +738,141 @@ SCENARIOS.alerts_in_viewer_and_menu = function () {
   });
   check('the main menu stays quiet for a camera in Live mode', L.tones.length === 0 && !has(L.titles, 'MOTION!') && L.urls.length > 3, '(' + L.urls.length + ' status checks)');
 
-  // alerts can be switched off from the main menu (Alerts: Beep + LED -> Off)
+  // alerts can be switched off in Settings (Alerts: Beep+LED -> Off)
   FC.reset({ mode: 2 });
   L = runApp({
     preconnected: true,
-    keys: script([
-      { when: MENU(1), key: 'prev' },        // wrap to Exit
-      { when: MENU(2), key: 'prev' },        // Alerts
-      { when: MENU(3), key: 'sel' },         // Beep+LED -> Off (cycle is Off? 2 -> 0)
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' },           // Alerts
+      { when: null, key: 'sel' },            // Beep+LED -> Off
+      { when: null, key: 'esc' },            // back to the main menu
       { when: function (l) { return l.urls.length >= 1; }, run: function () { FC.state().mseq = 9; } },
-      { when: function (l) { return l.ticks > 400; }, key: 'esc' }
-    ])
+      { when: function (l) { return l.ticks > 900; }, key: 'esc' }
+    ]))
   });
-  check('with alerts Off the menu stays silent', L.tones.length === 0 && L.blinks === 0 && !has(L.titles, 'MOTION!'));
+  check('with alerts Off the menu stays silent', L.tones.length === 0 && L.blinks === 0 && !has(L.titles, 'MOTION!') && L.writes === 1);
 
   // ...and so does the live viewer, even though it sees the same motion
   FC.reset({ mode: 2 });
   L = runApp({
-    keys: script([
-      { when: MENU(1), key: 'prev' },        // Exit
-      { when: MENU(2), key: 'prev' },        // Alerts
-      { when: MENU(3), key: 'sel' },         // Beep + LED -> Off
-      { when: MENU(4), key: 'next' },        // Exit
-      { when: MENU(5), key: 'next' },        // Watch live
-      { when: MENU(6), key: 'sel' },
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' },           // Alerts
+      { when: null, key: 'sel' },            // Beep + LED -> Off
+      { when: null, key: 'esc' },            // back to the main menu (cursor on Settings)
+      { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
+      { when: null, key: 'sel' },            // Watch live
       { when: function (l) { return l.jpgs.length >= 3; }, run: function (l) { FC.state().motion = 1; FC.state().lv = 30; l.motionAt = l.urls.length; } },
       { when: function (l) { return l.urls.length > l.motionAt + 8; }, key: 'prev' },   // give the camera's reply time to carry the motion flag
-      { when: MENU(7), key: 'esc' }
-    ])
+      { when: null, key: 'esc' }
+    ]))
   });
   check('with alerts Off the live viewer stays silent too', L.jpgs.length >= 8 && L.tones.length === 0 && L.blinks === 0, '(' + L.jpgs.length + ' strips, ' + L.tones.length + ' tones, ' + L.blinks + ' blinks, alertLevel ' + alertLevel + ')');
+};
+
+SCENARIOS.settings_auto_record = function () {
+  // Auto-record lives on the camera: the first press connects, then it toggles and the row follows
+  FC.reset({ auto: 1, mode: 2 });
+  var L = runApp({
+    keys: script(toSettings().concat([
+      { when: null, key: 'prev' },                                              // Auto-record
+      { when: null, key: 'sel' },                                               // connects, then 1 -> 0
+      { when: function (l) { return FC.state().auto === 0; }, key: 'sel' },     // 0 -> 1
+      { when: function (l) { return FC.state().auto === 1 && countUrls(l, /\/ctl\?auto=1$/) === 1; }, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('app ran without throwing', L.error === '', L.error);
+  check('the first press connects once and then switches auto-record off', L.joins === 1 && countUrls(L, /\/ctl\?auto=0$/) === 1);
+  check('the second press switches it back on', countUrls(L, /\/ctl\?auto=1$/) === 1 && FC.state().auto === 1);
+  check('the row shows the camera\'s state (an OFF toggle after the first press)', anyText(L, /^OFF$/) && anyText(L, /^ON$/));
+  check('auto-record is not a Stick setting: nothing is written to the Stick', L.writes === 0);
+
+  // outside Security mode the row says where it applies
+  FC.reset({ auto: 1, mode: 1 });
+  L = runApp({
+    keys: script(toSettings().concat([
+      { when: null, key: 'prev' }, { when: null, key: 'sel' },
+      { when: function (l) { return FC.state().auto === 0; }, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('in Guard mode the hint says auto-record is used in Security mode', anyText(L, /Used in Security mode/));
+};
+
+SCENARIOS.settings_persist = function () {
+  // change three Stick settings: each one is saved as a whole file
+  FC.reset();
+  var L = runApp({
+    keys: script(toSettings().concat([
+      { when: null, key: 'sel' },                                               // Picture: Photo -> Fast
+      { when: null, key: 'next' }, { when: null, key: 'sel' },                  // Alerts: Beep+LED -> Off
+      { when: null, key: 'next' }, { when: null, key: 'sel' },                  // Info line: On -> Off
+      { when: null, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  var saved = null;
+  try {
+    saved = JSON.parse(L.files['/MiniCCTV.cfg']);
+  } catch (e) {
+    saved = null;
+  }
+  check('app ran without throwing', L.error === '', L.error);
+  check('each change is written (three writes) and the file is one valid JSON object', L.writes === 3 && saved !== null, '(' + L.files['/MiniCCTV.cfg'] + ')');
+  check('the file holds the new defaults', saved !== null && saved.photo === 0 && saved.alerts === 0 && saved.hud === 0 && saved.v === 1);
+  check('no camera was needed for any of it', L.urls.length === 0);
+  check('the rows show the new values', anyText(L, /^Fast$/) && anyText(L, /^Off$/));
+
+  // next start: the defaults are used (Fast picture, LED-only alerts, no info chip)
+  FC.reset({ mode: 1 });
+  L = runApp({
+    files: { '/MiniCCTV.cfg': '{"v":1,"photo":0,"alerts":1,"hud":0}' },
+    keys: script([
+      { when: MENU(1), key: 'sel' },
+      { when: function (l) { return l.bitmaps.length >= 3; }, run: function (l) { FC.state().motion = 1; FC.state().lv = 20; l.motionAt = l.urls.length; } },
+      { when: function (l) { return l.urls.length > l.motionAt + 8; }, key: 'prev' },
+      { when: MENU(2), key: 'esc' }
+    ])
+  });
+  check('a saved Fast default is used from the first picture on', L.bitmaps.length >= 3 && L.jpgs.length === 0 && countUrls(L, /\/d\?f=j/) === 0);
+  check('a saved Info line Off hides the info chip', !anyText(L, /^(FAST|PHOTO) /));
+  check('a saved LED-only alert level blinks without beeping', L.blinks === 1 && L.tones.length === 0, '(' + L.blinks + ' blinks, ' + L.tones.length + ' tones)');
+
+  // a damaged or out-of-range file is ignored, not trusted
+  var bad = ['{oops', '', '[]', '{"v":1,"photo":7,"alerts":9,"hud":2}', '{"photo":"yes"}'];
+  var okAll = true;
+  for (var i = 0; i < bad.length; i++) {
+    FC.reset();
+    L = runApp({ files: { '/MiniCCTV.cfg': bad[i] }, keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+    if (L.error !== '' || L.jpgs.length < 3 || L.bitmaps.length > 0 || L.writes !== 0 || photo !== true || hud !== true || alertLevel !== 2) {
+      okAll = false;
+      out('  bad config ' + JSON.stringify(bad[i]) + ' -> error "' + L.error + '", ' + L.jpgs.length + ' strips, ' + L.bitmaps.length + ' bands');
+    }
+  }
+  check('damaged or out-of-range settings files fall back to the defaults (Photo) without crashing', okAll);
+
+  // storage that throws must not break the app, and the setting still applies for this run
+  FC.reset({ autoMotion: true });
+  L = runApp({ storageBroken: true, keys: script(toFastWatch().concat([{ when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: null, key: 'esc' }])) });
+  check('with unusable storage the app still runs and the change applies for now', L.error === '' && L.bitmaps.length >= 3 && L.jpgs.length === 0, L.error);
+};
+
+SCENARIOS.settings_without_camera = function () {
+  FC.reset({ down: true });
+  var L = runApp({
+    keys: script(toSettings().concat([
+      { when: null, key: 'sel' },                                               // Picture works offline
+      { when: null, key: 'prev' }, { when: null, key: 'sel' },                  // Auto-record needs the camera
+      { when: function (l) { return anyText(l, /Joined WiFi, camera silent/); }, key: 'prev' },   // back out of the error
+      { when: null, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('app ran without throwing', L.error === '', L.error);
+  check('Stick-side settings change and save with the camera off', L.writes === 1 && anyText(L, /^Fast$/));
+  check('camera-side rows wait ("...") until the camera has answered', anyText(L, /^\.\.\.$/));
+  check('pressing one tries to connect and explains when it cannot', anyText(L, /Joined WiFi, camera silent/) && countUrls(L, /\/ctl\?auto/) === 0);
+  check('...and leaves you in Settings, then the main menu', L.menuDraws >= 2);
 };
 
 SCENARIOS.tables_match_firmware = function () {
@@ -662,6 +894,7 @@ SCENARIOS.tables_match_firmware = function () {
     if (FILTERS[j] !== GOLDEN.filters[j]) { f = false; why = 'filter ' + j; }
   }
   check('filter names match firmware/mini_cctv/filters.h', f, why);
+  check('the alert level names line up', ALERT_NAMES.length === 3 && ALERT_SHORT.length === 3 && FLIP_NAMES.length === 4);
 };
 
 SCENARIOS.ir_trigger = function () {
@@ -741,6 +974,40 @@ SCENARIOS.stream_trouble = function () {
   });
   check('a truncated reply is rejected and nothing half-drawn', L.jpgs.length === 0 && L.bitmaps.length === 0 && L.error === '');
 
+  // a reply that is well-formed but shorter than its Content-Length is dropped too
+  FC.reset({ autoMotion: true });
+  L = runApp({
+    maxTicks: 300,
+    fetch: function (url) {
+      if (/\/d\?/.test(url)) {
+        var r2 = FC.handle(url, { responseType: 'binary' });
+        return { status: 200, body: new Uint8Array(r2.body), length: r2.length + 5 };
+      }
+      return null;
+    },
+    keys: script([{ when: MENU(1), key: 'sel' }])
+  });
+  check('a reply shorter than its declared length is rejected even if it parses', L.jpgs.length === 0 && L.error === '');
+
+  // Fast mode: a band that is not exactly 240 x rows bytes is rejected (drawBitmap needs an exact size)
+  FC.reset();
+  L = runApp({
+    maxTicks: 300,
+    files: { '/MiniCCTV.cfg': '{"v":1,"photo":0,"alerts":2,"hud":1}' },
+    fetch: function (url) {
+      if (/\/d\?/.test(url)) {
+        var body = new Uint8Array(8 + 2 + 100);
+        body[0] = 1; // band 0 only
+        body[2] = 1; // seq 1
+        body[8] = 100; // 100 bytes where 3840 are due
+        return { status: 200, body: body, length: body.length };
+      }
+      return null;
+    },
+    keys: script([{ when: MENU(1), key: 'sel' }])
+  });
+  check('a Fast band of the wrong size is rejected, not drawn or thrown on', L.bitmaps.length === 0 && L.error === '', L.error);
+
   // camera reboot: its update counter starts again from 1
   FC.reset({ autoMotion: true });
   var n = 0;
@@ -780,13 +1047,9 @@ SCENARIOS.real_firmware_bytes = function () {
       if (/\/d\?/.test(url)) { return { status: 200, body: empty(1), length: 8 }; }
       return null;
     },
-    keys: script([
-      { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'next' },
-      { when: MENU(5), key: 'sel' },
-      { when: MENU(6), key: 'prev' }, { when: MENU(7), key: 'prev' }, { when: MENU(8), key: 'prev' }, { when: MENU(9), key: 'prev' },
-      { when: MENU(10), key: 'sel' },
+    keys: script(toFastWatch().concat([
       { when: function (l) { return countUrls(l, /\/d\?f=8&s=1$/) >= 3; }, run: function (l) { l.snap = new Uint8Array(l.fb); }, key: 'esc' }
-    ])
+    ]))
   });
   check('golden raw8: app ran without throwing', L.error === '', L.error);
   check('golden raw8: 9 bands drawn, the last one 7 rows', L.bitmaps.length >= 9 && L.bitmaps[8].h === 7 && L.bitmaps[0].h === 16);
@@ -819,11 +1082,9 @@ SCENARIOS.long_run_memory = function () {
   FC.reset({ autoMotion: true });
   L = runApp({
     maxTicks: 200000,
-    keys: script([
-      { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'next' }, { when: MENU(5), key: 'sel' },
-      { when: MENU(6), key: 'prev' }, { when: MENU(7), key: 'prev' }, { when: MENU(8), key: 'prev' }, { when: MENU(9), key: 'prev' }, { when: MENU(10), key: 'sel' },
-      { when: function (l) { return l.bitmaps.length >= 1500; }, key: 'prev' }, { when: MENU(11), key: 'esc' }
-    ])
+    keys: script(toFastWatch().concat([
+      { when: function (l) { return l.bitmaps.length >= 1500; }, key: 'prev' }, { when: null, key: 'esc' }
+    ]))
   });
   check('1500 picture updates in Fast mode without running out of memory', L.error === '' && L.bitmaps.length >= 1500 && !L.timeout, L.error);
 };
@@ -834,11 +1095,9 @@ SCENARIOS.footprint = function () {
   FC.reset({ autoMotion: true });
   var L = runApp({
     light: true, maxTicks: 200000,
-    keys: script([
-      { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'next' }, { when: MENU(5), key: 'sel' },
-      { when: MENU(6), key: 'prev' }, { when: MENU(7), key: 'prev' }, { when: MENU(8), key: 'prev' }, { when: MENU(9), key: 'prev' }, { when: MENU(10), key: 'sel' },
-      { when: function (l) { return l.bitmapCount >= 300; }, key: 'prev' }, { when: MENU(11), key: 'esc' }
-    ])
+    keys: script(toFastWatch().concat([
+      { when: function (l) { return l.bitmapCount >= 300; }, key: 'prev' }, { when: null, key: 'esc' }
+    ]))
   });
   check('300 Fast updates ran', L.error === '' && L.bitmapCount >= 300, L.error);
   FC.reset({ autoMotion: true });

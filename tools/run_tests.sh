@@ -56,4 +56,10 @@ mq=""
 if [ -n "${MQJS:-}" ] && [ -x "$MQJS" ]; then mq="$MQJS"; else mq=$(tools/get_mqjs.sh 2>/dev/null || true); fi
 [ -n "$mq" ] || echo "(could not build mquickjs: testing on Node only. Needs git, gcc, make and network.)"
 node tools/test_app.js "$tmp/golden" $mq
+
+echo "== Do the app tests notice when the app is broken? (mutation check)"
+node tools/mutate.js "$tmp/golden"
+
+echo "== Every screen renders (and nothing is drawn off-screen)"
+node tools/ui_preview.js "$tmp/screens"
 echo "all test suites passed"

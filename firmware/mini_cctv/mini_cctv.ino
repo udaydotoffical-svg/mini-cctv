@@ -143,13 +143,15 @@ static uint8_t *g_resp; // private to the /d handler (one httpd task serves port
 static httpd_handle_t g_httpd = nullptr;
 static httpd_handle_t g_stream = nullptr;
 
-// The chosen mode (and timelapse interval) survive power cycles.
+// The chosen mode, timelapse interval and auto-record switch survive power cycles.
 static Preferences g_prefs;
 static void loadPrefs() {
     g_prefs.begin("cctv", true);
     const int m = g_prefs.getUChar("mode", DEFAULT_MODE);
     const uint32_t tl = g_prefs.getUShort("tl", TIMELAPSE_SEC);
+    const bool ar = g_prefs.getUChar("ar", REC_AUTO_DEFAULT ? 1 : 0) != 0;
     g_prefs.end();
+    g_autoRec = ar;
     g_mode = (m >= 0 && m < MODE_COUNT) ? m : DEFAULT_MODE;
     g_tlSec = tl < 5 ? 5 : (tl > 3600 ? 3600 : tl);
 }
@@ -157,6 +159,7 @@ static void savePrefs() {
     g_prefs.begin("cctv", false);
     g_prefs.putUChar("mode", (uint8_t)g_mode);
     g_prefs.putUShort("tl", (uint16_t)g_tlSec);
+    g_prefs.putUChar("ar", g_autoRec ? 1 : 0);
     g_prefs.end();
 }
 
@@ -754,7 +757,13 @@ static esp_err_t ctlHandler(httpd_req_t *req) {
     if (has("fl")) { g_vflip = atoi(v) != 0; g_sensorDirty = true; }
     if (has("mi")) { g_mirror = atoi(v) != 0; g_sensorDirty = true; }
     if (has("br")) { g_bright = viewClamp(atoi(v), -2, 2); g_sensorDirty = true; }
-    if (has("auto")) g_autoRec = atoi(v) != 0;
+    if (has("auto")) {
+        const bool a = atoi(v) != 0;
+        if (a != g_autoRec) {
+            g_autoRec = a;
+            savePrefs();
+        }
+    }
     if (has("mode")) {
         const int m = atoi(v);
         if (m >= 0 && m < MODE_COUNT && m != g_mode) {
