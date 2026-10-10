@@ -47,13 +47,13 @@ pio device monitor
 | `s3cam_lcd` | boards with the `ESP32S3_CAM_LCD` pinout (XCLK 40, SIOD 17) |
 | `xiao_s3` | Seeed XIAO ESP32S3 Sense |
 
-Another board? Add a pin block to `firmware/include/camera_pins.h`. If the picture is upside-down or mirrored, flip `CAM_VFLIP` / `CAM_HMIRROR` in `config.h`. If the monitor says "PSRAM not found", you picked the wrong octal/quad env.
+Another board? Add a pin block to `firmware/include/camera_pins.h`. `CAM_VFLIP` is on by default (the ESP32-S3-EYE sensor is mounted upside down); if the picture is still wrong, change `CAM_VFLIP` / `CAM_HMIRROR` in `config.h`. If the monitor says "PSRAM not found", you picked the wrong octal/quad env.
 
-On boot the camera starts a WiFi network **`MiniCCTV`** (password `cctv12345`; change both in `config.h`). Join it from a phone and open `http://192.168.4.1/` to see the feed and check the camera works before involving the Stick.
+On boot the camera starts a WiFi network **`ESP32-CAM-S3`** (password `12345678`, same as your CameraWebServer sketch; change both in `config.h`). Join it from a phone and open `http://192.168.4.1/` to see the feed and check the camera works before involving the Stick.
 
 ### 2. Put the app on the Stick
 
-Copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick's SD card, or upload it through the Bruce WebUI. Run it from **JS Interpreter → MiniCCTV.js**. It joins the `MiniCCTV` network by itself, so you don't need to connect WiFi in Bruce first.
+Copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick's SD card, or upload it through the Bruce WebUI. Run it from **JS Interpreter → MiniCCTV.js**. It joins the `ESP32-CAM-S3` network by itself, so you don't need to connect WiFi in Bruce first.
 
 SEL toggles the status bar. Quit with ESC. On the Stick that is the combo Bruce's own example script uses, "Sel + Next".
 

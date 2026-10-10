@@ -72,6 +72,8 @@ static bool initCamera() {
     if (s) {
         s->set_vflip(s, CAM_VFLIP);
         s->set_hmirror(s, CAM_HMIRROR);
+        s->set_brightness(s, CAM_BRIGHTNESS);
+        s->set_saturation(s, CAM_SATURATION);
     }
     return true;
 }

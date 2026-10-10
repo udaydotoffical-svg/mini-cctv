@@ -5,8 +5,8 @@
 // Default: the camera is its own access point, so no router is needed.
 // The Stick joins CCTV_AP_SSID and fetches http://192.168.4.1/jpg
 // ---------------------------------------------------------------------------
-#define CCTV_AP_SSID    "MiniCCTV"
-#define CCTV_AP_PASS    "cctv12345" // must be >= 8 chars
+#define CCTV_AP_SSID    "ESP32-CAM-S3"
+#define CCTV_AP_PASS    "12345678" // must be >= 8 chars
 #define CCTV_AP_CHANNEL 6
 
 // Set to 1 to join an existing router instead (then point the Bruce app at the
@@ -24,6 +24,9 @@
 #define OUT_H        128
 #define JPEG_QUALITY 60 // 1..100, higher = bigger frames (60 ~ 6-9 KB)
 
-// Flip these if the picture is upside down / mirrored on your board.
-#define CAM_VFLIP   0
-#define CAM_HMIRROR 0
+// Sensor tuning. These match the stock CameraWebServer sketch for the
+// ESP32-S3-EYE pinout (vflip on, brightness +1, saturation 0).
+#define CAM_VFLIP      1
+#define CAM_HMIRROR    0
+#define CAM_BRIGHTNESS 1 // -2..2
+#define CAM_SATURATION 0 // -2..2
