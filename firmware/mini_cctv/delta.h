@@ -18,6 +18,8 @@
 // Response body (all little-endian):
 //   u16 mask      bit i set = band i is included
 //   u32 seq       the viewer should pass this as `s` next time
+//   u8  motion    0..100, how much of the scene is moving right now
+//   u8  flags     DF_* bits below
 //   then, for each set bit in ascending order:  u16 len, then len bytes
 //
 // If a viewer sends s greater than the camera's seq, the camera has rebooted;
@@ -27,6 +29,14 @@
 // their own lock around the DeltaState.
 
 #define DELTA_MAX_BANDS 16
+#define DELTA_HEADER    8
+
+// flags in the reply header
+#define DF_REC      0x01 // the camera is recording a clip
+#define DF_SD       0x02 // an SD card is working
+#define DF_BIG      0x04 // the moving area is person-sized
+#define DF_MOTION   0x08 // motion is active (held for a few seconds after it stops)
+#define DF_OVERRIDE 0x10 // the picture is a rewind / photo / clip, not the live view
 
 struct DeltaState {
     uint32_t seq;                      // latest picture update (0 = no picture yet)
@@ -62,10 +72,10 @@ static inline int deltaBandRows(int i, int nb, int bandH, int h) { return (i == 
 //   raw      full RGB332 frame (w*h bytes), used when !jpg
 //   jpgBufs  one strip JPEG per band, used when jpg (length from s.jpgLen)
 static inline size_t deltaBuild(
-    uint8_t *out, size_t cap, const DeltaState &s, uint32_t mask, uint32_t seq, bool jpg, int nb, int bandH, int w,
-    int h, const uint8_t *raw, const uint8_t *const *jpgBufs
+    uint8_t *out, size_t cap, const DeltaState &s, uint32_t mask, uint32_t seq, uint8_t motion, uint8_t flags, bool jpg,
+    int nb, int bandH, int w, int h, const uint8_t *raw, const uint8_t *const *jpgBufs
 ) {
-    if (cap < 6) return 0;
+    if (cap < DELTA_HEADER) return 0;
     size_t o = 0;
     out[o++] = (uint8_t)(mask & 0xFF);
     out[o++] = (uint8_t)((mask >> 8) & 0xFF);
@@ -73,6 +83,8 @@ static inline size_t deltaBuild(
     out[o++] = (uint8_t)((seq >> 8) & 0xFF);
     out[o++] = (uint8_t)((seq >> 16) & 0xFF);
     out[o++] = (uint8_t)((seq >> 24) & 0xFF);
+    out[o++] = motion;
+    out[o++] = flags;
     for (int i = 0; i < nb; i++) {
         if (!(mask & (1u << i))) continue;
         const uint8_t *src;

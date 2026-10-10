@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "delta.h"
+#include "filters.h"
+#include "modes.h"
 
 static int failed = 0;
 #define CHECK(name, cond)                                \
@@ -24,17 +26,20 @@ static const int W = 240, H = 135, BH = 16, NB = 9;
 
 struct Parsed {
     uint32_t mask, seq;
+    int motion, flags;
     std::vector<std::pair<int, std::vector<uint8_t>>> bands; // band index, payload
     bool ok;
 };
 
 // Independent reference parser (mirrors what the JS app does).
 static Parsed parse(const std::vector<uint8_t> &b) {
-    Parsed p{0, 0, {}, false};
-    if (b.size() < 6) return p;
+    Parsed p{0, 0, 0, 0, {}, false};
+    if (b.size() < DELTA_HEADER) return p;
     p.mask = b[0] | (b[1] << 8);
     p.seq = b[2] | (b[3] << 8) | (b[4] << 16) | ((uint32_t)b[5] << 24);
-    size_t off = 6;
+    p.motion = b[6];
+    p.flags = b[7];
+    size_t off = DELTA_HEADER;
     for (int i = 0; i < NB; i++) {
         if (!(p.mask & (1u << i))) continue;
         if (off + 2 > b.size()) return p;
@@ -50,14 +55,14 @@ static Parsed parse(const std::vector<uint8_t> &b) {
 
 static std::vector<uint8_t> build(const DeltaState &s, uint32_t since, bool jpg, const std::vector<uint8_t> &raw,
                                   const std::vector<std::vector<uint8_t>> &strips, uint32_t *maskOut = nullptr,
-                                  bool *waitOut = nullptr) {
+                                  bool *waitOut = nullptr, uint8_t motion = 37, uint8_t flags = DF_SD | DF_MOTION) {
     uint32_t seq;
     bool waiting;
     uint32_t mask = deltaPlan(s, since, jpg, NB, &seq, &waiting);
     std::vector<const uint8_t *> ptrs(NB);
     for (int i = 0; i < NB; i++) ptrs[i] = strips[i].data();
-    std::vector<uint8_t> out(6 + NB * (2 + 12288));
-    size_t n = deltaBuild(out.data(), out.size(), s, mask, seq, jpg, NB, BH, W, H, raw.data(), ptrs.data());
+    std::vector<uint8_t> out(DELTA_HEADER + NB * (2 + 12288));
+    size_t n = deltaBuild(out.data(), out.size(), s, mask, seq, motion, flags, jpg, NB, BH, W, H, raw.data(), ptrs.data());
     out.resize(n);
     if (maskOut) *maskOut = mask;
     if (waitOut) *waitOut = waiting;
@@ -87,7 +92,7 @@ int main(int argc, char **argv) {
     {
         uint32_t m; auto r = build(s, 0, false, raw, strips, &m);
         auto p = parse(r);
-        CHECK("no picture yet: empty reply, seq 0", p.ok && m == 0 && p.seq == 0 && r.size() == 6);
+        CHECK("no picture yet: empty reply, seq 0", p.ok && m == 0 && p.seq == 0 && r.size() == DELTA_HEADER);
     }
 
     // first picture: every band at seq 1
@@ -103,7 +108,8 @@ int main(int argc, char **argv) {
                      std::equal(b.second.begin(), b.second.end(), raw.begin() + (size_t)b.first * BH * W);
         }
         CHECK("raw8 full frame: 9 bands, last band 7 rows, content intact", rowsOk);
-        CHECK("raw8 full frame size = 6 + 2*9 + 240*135", full8.size() == 6 + 18 + (size_t)W * H);
+        CHECK("raw8 full frame size = 8 + 2*9 + 240*135", full8.size() == DELTA_HEADER + 18 + (size_t)W * H);
+        CHECK("header carries the motion level and flags", p.motion == 37 && p.flags == (DF_SD | DF_MOTION));
     }
 
     // viewer is up to date
@@ -164,7 +170,7 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> tiny(100);
         std::vector<const uint8_t *> ptrs(NB);
         for (int i = 0; i < NB; i++) ptrs[i] = strips[i].data();
-        size_t n = deltaBuild(tiny.data(), tiny.size(), s, 0x1FF, 3, false, NB, BH, W, H, raw.data(), ptrs.data());
+        size_t n = deltaBuild(tiny.data(), tiny.size(), s, 0x1FF, 3, 0, 0, false, NB, BH, W, H, raw.data(), ptrs.data());
         CHECK("too-small buffer is refused, not overrun", n == 0);
     }
 
@@ -184,6 +190,14 @@ int main(int argc, char **argv) {
         FILE *f = fopen((dir + "/dj_partial.txt").c_str(), "w");
         fprintf(f, "2 %zu %d %d\n8 %zu %d %d\n", strips[2].size(), strips[2][0], strips[2][1], strips[8].size(), strips[8][0], strips[8][1]);
         fclose(f);
+        // the firmware's own mode and filter tables, so the Bruce app can be checked against them
+        FILE *m = fopen((dir + "/modes.txt").c_str(), "w");
+        for (int i = 0; i < MODE_COUNT; i++)
+            fprintf(m, "%s|%s|%d|%d\n", modeName(i), modeBlurb(i), modeCaps(i).alerts ? 1 : 0, modeCaps(i).needsSd ? 1 : 0);
+        fprintf(m, "filters");
+        for (int i = 0; i < FILTER_COUNT; i++) fprintf(m, "|%s", filterName(i));
+        fprintf(m, "\n");
+        fclose(m);
         printf("wrote golden files to %s\n", dir.c_str());
     }
 
