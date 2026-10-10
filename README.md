@@ -129,7 +129,7 @@ Camera pins default to the ESP32-S3-EYE map (`CAMERA_MODEL_ESP32S3_EYE`, top of 
 
 ### 2. The SD card
 
-Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's SD slot in 1-bit SD_MMC mode on pins **CLK 39, CMD 38, D0 40**, the wiring the Freenove ESP32-S3-WROOM CAM documents and the ESP32-S3-EYE uses. **The vendor doesn't publish the OceanLabz SD pins**, so if the Serial Monitor (115200) says `SD: init failed ... CLK=39 CMD=38 D0=40`, check the pins against the board's schematic and set `SD_CLK_PIN`, `SD_CMD_PIN`, `SD_D0_PIN` in `config.h`. A healthy boot prints `SD: ok, 29.7 GB card, 29500 MB free`. SD cards wired over SPI (the XIAO ESP32S3 Sense, for example) are not supported.
+Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's SD slot in 1-bit SD_MMC mode on pins **CLK 39, CMD 38, D0 40**, the wiring the Freenove ESP32-S3-WROOM CAM documents and the ESP32-S3-EYE uses. **These pins are confirmed on the OceanLabz board** (the vendor doesn't publish them, but a real boot log shows `SD: ok, 7.5 GB card, 7609 MB free` and a clip recorded to it). A healthy boot prints that `SD: ok` line. With no card in the slot the log shows `sdmmc_init_ocr: send_op_cond (1) returned 0x107` and `SD: init failed ...`: that only means nothing answered (no card, not fully seated, or not FAT32); the camera keeps streaming and warns. If it still fails with a good FAT32 card in, try another card, then check `SD_CLK_PIN`, `SD_CMD_PIN`, `SD_D0_PIN` in `config.h`. The line `E ... esp_core_dump_flash: Incorrect size of core dump image` at boot is harmless (an unused crash-dump partition). SD cards wired over SPI (the XIAO ESP32S3 Sense, for example) are not supported.
 
 ### 3. Put the app on the Stick
 
@@ -189,10 +189,9 @@ The uploader can't flash anything: it runs in the cloud with no access to your U
 ## Status
 
 - **Verified here:** the logic of everything above (C++ under AddressSanitizer; AVI files by ffprobe/ffmpeg), the app on the real mquickjs engine including its memory use, the Bruce API behaviour it relies on (read from `pr3y/Bruce` at `a59213f` and its mquickjs fork), and that the firmware compiles for all five envs on Arduino-ESP32 core 2.0.17 (PlatformIO) and, for the OceanLabz settings, on core 3.3.12 (`tools/build_arduino_cli.sh`, the Arduino IDE's own toolchain).
-- **Not verified, because it needs the hardware:**
-  - the camera running this version, and its real frame rate (the Serial Monitor prints `fps`, `loop` and `wait` times, and `/status` shows them);
-  - the SD card: the pin map for your board (see above), and write speed during recording;
-  - JPEG decoding for rewind, photos and clips (`/status` shows `"dec": 0..3` when the decoder layout was recognised; `-1` means those three features are disabled);
-  - the Stick app on a real Stick (the mocks are faithful but they aren't a Stick), and the buzzer/LED/IR calls;
-  - running on the board with either core (both compile; neither has run on hardware from here).
+- **Verified on the OceanLabz board** (from a real boot log): the camera starts and its WiFi network comes up; it streams; the JPEG decoder layout is recognised (`JPEG decoder layout: 1`, so rewind, photo and clip viewing are enabled); the SD card works on the default pins (7.5 GB card); with no card it warns and keeps streaming; and Security mode starts a clip when something moves (`REC: /cctv/clips/VID_0001.avi`). Measured on the camera: about 5.6 updates per second idle and about 3.6 while motion is being recorded (`loop` goes from about 150 ms to about 250 ms: it is processing-bound, the camera waits for nothing).
+- **Not verified, because it needs more hardware time:**
+  - the Stick app on a real Stick (the mocks are faithful but they aren't a Stick), including its frame rate, and the buzzer/LED/IR calls;
+  - viewing a photo, a clip or a rewind (the decoder is recognised, but playback has not been seen), and a clip played back in VLC;
+  - SD write speed over a long recording, and a card inserted while the camera is running (it retries every 30 s).
 - **Limits:** "person-sized" is a size heuristic; there is no real person recognition (the on-device ML libraries aren't available in the Arduino IDE core). One camera, one Stick (two Sticks would see the same picture and fight over zoom). The Stick needs a Bruce build with the mquickjs interpreter and PSRAM.
