@@ -278,17 +278,24 @@ static void calibrateDecoder() {
     Serial.printf("JPEG decoder layout: %d%s\n", g_decLayout, g_decLayout < 0 ? " (rewind/photo/clip viewing disabled)" : "");
 }
 
+// The decoder's scale type is called jpg_scale_t in older camera drivers and esp_jpeg_image_scale_t in
+// newer ones (Arduino-ESP32 core 3.x), but both still define the JPG_SCALE_* constants. Taking the type
+// from a constant, and picking scales from a table, builds on either.
+typedef decltype(JPG_SCALE_NONE) DecScale;
+static const DecScale kDecScale[4] = {JPG_SCALE_NONE, JPG_SCALE_2X, JPG_SCALE_4X, JPG_SCALE_8X};
+
 // Decode a JPEG and fit it, letterboxed, into g_ovRgb (the Stick-sized picture).
 static bool decodeFit(const uint8_t *jpg, size_t len) {
     if (g_decLayout < 0) return false;
     int w, h;
     if (!jpegSize(jpg, len, &w, &h)) return false;
     int div = 1;
-    jpg_scale_t sc = JPG_SCALE_NONE;
+    int step = 0; // div = 1 << step
     while ((w / div > DEC_MAXW || h / div > DEC_MAXH) && div < 8) {
         div *= 2;
-        sc = (jpg_scale_t)(sc + 1);
+        step++;
     }
+    const DecScale sc = kDecScale[step];
     if (w % div || h % div || w / div > DEC_MAXW || h / div > DEC_MAXH) return false;
     const int ow = w / div, oh = h / div;
     if (!jpg2rgb565(jpg, len, g_decTmp, sc)) return false;
