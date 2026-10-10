@@ -178,6 +178,12 @@ Needs g++, Python 3 with Pillow, and Node; ffmpeg and git/gcc/make are used if p
 - `node tools/mq_footprint.js <mqjs>` measures the app's JS heap use on that engine.
 - `node tools/fake_cam_server.js` serves the fake camera over HTTP so a real Stick can be tried against a laptop (set `CAM_HOST` to the laptop and `JOIN_CAM_WIFI = false`).
 
+## Uploading with Claude Code
+
+`.claude/agents/uploader.md` is a Claude Code subagent that uploads the project for you. In a Claude Code session on this repo say "upload it" (branch only) or "upload it to main" (also fast-forwards `main`), or call it with `@agent-uploader`. It commits what is pending (leaving out build output and anything that looks like a secret), runs `tools/run_tests.sh` and, if the firmware changed, builds all five environments, then pushes. If a test or build fails it stops and tells you instead of pushing. It never force-pushes, never opens a pull request unless you ask, and refuses to move `main` unless it is a clean fast-forward.
+
+It can't flash anything: it runs in the cloud with no access to your USB ports. Its report ends by saying which of the two you need to redo on your computer: re-flash `firmware/mini_cctv/` from the Arduino IDE, and/or copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick.
+
 ## Status
 
 - **Verified here:** the logic of everything above (C++ under AddressSanitizer; AVI files by ffprobe/ffmpeg), the app on the real mquickjs engine including its memory use, the Bruce API behaviour it relies on (read from `pr3y/Bruce` at `a59213f` and its mquickjs fork), and that the firmware compiles on Arduino-ESP32 core 2.0.17 for all five envs.
