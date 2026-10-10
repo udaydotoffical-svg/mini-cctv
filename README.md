@@ -28,6 +28,7 @@ That leaves **WiFi**. Bruce's JS has exactly the two calls this needs: `wifi.htt
 | `bruce/MiniCCTV.js` | The Bruce app |
 | `tools/fake_cam.py` | Fake camera server, to test the Stick without the S3 |
 | `tools/test_app.js` | Host-side test of `MiniCCTV.js` against the fake camera |
+| `tools/test_scaler.cpp` | Host-side test (AddressSanitizer) of the image scaler in `firmware/mini_cctv/scaler.h` |
 
 ## Setup
 
@@ -62,10 +63,10 @@ Set `USE_STA 1` and your SSID and password in `config.h`. Read the IP from the s
 
 ## Design notes
 
-- **Why the camera re-encodes the picture.** Bruce decodes with picojpeg, which handles only baseline JPEGs, and it can't scale. The panel is 240x135 and the sensor's smallest useful JPEG size is wider than that. So the S3 grabs RGB565 at QVGA, centre-crops to 240x128 and software-encodes a baseline JPEG. 240x128 is exactly 15x8 JPEG blocks, so there are no ragged edges. It leaves 7 px at the bottom for the status bar.
+- **Why the camera re-encodes the picture.** Bruce decodes with picojpeg, which handles only baseline JPEGs, and it can't scale. The panel is 240x135 and the sensor's smallest useful JPEG size is wider than that. So the S3 grabs RGB565 at VGA (640x480), centre-crops it, box-filters it down to 240x128 (every source pixel under a target pixel is averaged, which is far cleaner than skipping pixels) and software-encodes a baseline JPEG at quality 85. 240x128 is exactly 15x8 JPEG blocks, so there are no ragged edges. It leaves 7 px at the bottom for the status bar.
 - **Why single frames, not MJPEG.** `httpFetch` buffers the whole body and returns it, so there is no streaming API on the Stick. It also needs a `Content-Length` header and can't use chunked encoding, which is why `/jpg` uses `httpd_resp_send`. Each frame is a new HTTP request, which is fine on a direct AP link. `/stream` (MJPEG on port 81) exists for browsers and VLC.
 - **Memory on the Stick.** Plus2 builds enable its 2 MB PSRAM. Bruce then gives the JS engine a 256 KB heap and `httpFetch` buffers in PSRAM, so 4-9 KB frames are no problem. Without PSRAM the JS heap shrinks to about 64-100 KB, which is still enough.
-- **Speed.** Expect roughly 5-10 fps. Bruce's `httpFetch` reads in 512-byte slices with a 1 ms wait, so smaller frames mean higher fps. Lower `JPEG_QUALITY` in `config.h` if you want more speed.
+- **Speed.** Expect roughly 5-10 fps. Bruce's `httpFetch` reads in 512-byte slices with a 1 ms wait, so smaller frames mean higher fps. For more speed, set `CAM_FRAMESIZE` to `FRAMESIZE_QVGA` and/or lower `JPEG_QUALITY` in `config.h`. For a sharper picture, raise `JPEG_QUALITY`. The panel itself is only 240x135, so that is the ceiling.
 - **Power.** Power the camera from its own USB supply. Don't run it off the Stick's Grove 5V: the camera plus WiFi draws a few hundred mA and the Stick has a 200 mAh battery.
 
 ## Testing without hardware

@@ -17,7 +17,7 @@
 
 //
 // Pipeline (runs continuously in captureTask):
-//   OV sensor -> RGB565 QVGA (320x240) -> crop + downscale to OUT_W x OUT_H
+//   OV sensor -> RGB565 (CAM_FRAMESIZE) -> crop + box-filter downscale to OUT_W x OUT_H
 //             -> software JPEG encode (baseline) -> latest-frame slot
 //
 // HTTP (port 80):  /jpg     one JPEG, Content-Length set (what Bruce's httpFetch wants)
@@ -38,6 +38,7 @@
 
 #include "camera_pins.h"
 #include "config.h"
+#include "scaler.h"
 
 static SemaphoreHandle_t g_mtx;
 static uint8_t *g_jpg = nullptr; // latest encoded frame (malloc'd)
@@ -73,7 +74,7 @@ static bool initCamera() {
     c.pin_reset = RESET_GPIO_NUM;
     c.xclk_freq_hz = 20000000;
     c.pixel_format = PIXFORMAT_RGB565; // works on OV2640/OV3660/OV5640 alike
-    c.frame_size = FRAMESIZE_QVGA;     // 320x240
+    c.frame_size = CAM_FRAMESIZE;      // see config.h
     c.jpeg_quality = 12;               // unused for RGB565
     c.fb_count = 2;
     c.fb_location = CAMERA_FB_IN_PSRAM;
@@ -94,20 +95,6 @@ static bool initCamera() {
     return true;
 }
 
-// Centre-crop the camera frame to the OUT_W:OUT_H aspect, nearest-neighbour scale.
-static void scaleToOut(const camera_fb_t *fb) {
-    const uint16_t *src = (const uint16_t *)fb->buf;
-    const int sw = fb->width, sh = fb->height;
-    int ch = (sw * OUT_H) / OUT_W;
-    if (ch > sh) ch = sh;
-    const int y0 = (sh - ch) / 2;
-    for (int y = 0; y < OUT_H; y++) {
-        const uint16_t *row = src + (size_t)(y0 + (y * ch) / OUT_H) * sw;
-        uint16_t *dst = g_scaled + (size_t)y * OUT_W;
-        for (int x = 0; x < OUT_W; x++) dst[x] = row[(x * sw) / OUT_W];
-    }
-}
-
 static void captureTask(void *) {
     int fails = 0;
     uint32_t winStart = millis(), winFrames = 0;
@@ -122,7 +109,7 @@ static void captureTask(void *) {
             continue;
         }
         fails = 0;
-        scaleToOut(fb);
+        scaleBox565(fb->buf, fb->width, fb->height, (uint8_t *)g_scaled, OUT_W, OUT_H);
         esp_camera_fb_return(fb);
 
         uint8_t *out = nullptr;

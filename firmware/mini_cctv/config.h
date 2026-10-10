@@ -22,7 +22,13 @@
 // ---------------------------------------------------------------------------
 #define OUT_W        240
 #define OUT_H        128
-#define JPEG_QUALITY 60 // 1..100, higher = bigger frames (60 ~ 6-9 KB)
+#define JPEG_QUALITY 85 // 1..100, higher = sharper + bigger frames (85 ~ 5-12 KB)
+
+// What the sensor captures before we shrink it to OUT_W x OUT_H. Capturing more
+// pixels than we send and averaging them down gives a much cleaner picture.
+//   FRAMESIZE_VGA  (640x480)  sharper, ~8-12 fps   <- default
+//   FRAMESIZE_QVGA (320x240)  faster, ~15+ fps, softer
+#define CAM_FRAMESIZE FRAMESIZE_VGA
 
 // Sensor tuning. These match the stock CameraWebServer sketch for the
 // ESP32-S3-EYE pinout (vflip on, brightness +1, saturation 0).
