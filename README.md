@@ -188,11 +188,11 @@ The uploader can't flash anything: it runs in the cloud with no access to your U
 
 ## Status
 
-- **Verified here:** the logic of everything above (C++ under AddressSanitizer; AVI files by ffprobe/ffmpeg), the app on the real mquickjs engine including its memory use, the Bruce API behaviour it relies on (read from `pr3y/Bruce` at `a59213f` and its mquickjs fork), and that the firmware compiles on Arduino-ESP32 core 2.0.17 for all five envs.
+- **Verified here:** the logic of everything above (C++ under AddressSanitizer; AVI files by ffprobe/ffmpeg), the app on the real mquickjs engine including its memory use, the Bruce API behaviour it relies on (read from `pr3y/Bruce` at `a59213f` and its mquickjs fork), and that the firmware compiles for all five envs on Arduino-ESP32 core 2.0.17 (PlatformIO) and, for the OceanLabz settings, on core 3.3.12 (`tools/build_arduino_cli.sh`, the Arduino IDE's own toolchain).
 - **Not verified, because it needs the hardware:**
   - the camera running this version, and its real frame rate (the Serial Monitor prints `fps`, `loop` and `wait` times, and `/status` shows them);
   - the SD card: the pin map for your board (see above), and write speed during recording;
   - JPEG decoding for rewind, photos and clips (`/status` shows `"dec": 0..3` when the decoder layout was recognised; `-1` means those three features are disabled);
   - the Stick app on a real Stick (the mocks are faithful but they aren't a Stick), and the buzzer/LED/IR calls;
-  - a build on Arduino-ESP32 core 3.x (my sandbox couldn't download it).
+  - running on the board with either core (both compile; neither has run on hardware from here).
 - **Limits:** "person-sized" is a size heuristic; there is no real person recognition (the on-device ML libraries aren't available in the Arduino IDE core). One camera, one Stick (two Sticks would see the same picture and fight over zoom). The Stick needs a Bruce build with the mquickjs interpreter and PSRAM.

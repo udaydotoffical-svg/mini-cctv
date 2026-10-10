@@ -21,7 +21,7 @@ You upload the mini-cctv project (repo `udaydotoffical-svg/mini-cctv`, default b
 
 3. **Prove it works.** Skip this only if the request says to skip tests.
    - `tools/run_tests.sh` (set `MQJS=/tmp/claude-0/mq/mquickjs/mqjs` first if that file exists, otherwise the script builds the engine itself). It must end with `all test suites passed`.
-   - If anything under `firmware/` changed against `origin/main`, build every environment: `cd firmware && for e in oceanlabz s3cam s3cam_qspi s3cam_lcd xiao_s3; do pio run -e $e; done`. All five must say SUCCESS.
+   - If anything under `firmware/` changed against `origin/main`, build every environment: `cd firmware && for e in oceanlabz s3cam s3cam_qspi s3cam_lcd xiao_s3; do pio run -e $e; done`. All five must say SUCCESS. If `arduino-cli` and the esp32 core are installed, also run `tools/build_arduino_cli.sh` (the Arduino IDE's toolchain: the camera driver differs between core 2.x and 3.x, and an IDE-only build break is easy to miss) and require `build OK`.
    - If a step fails, **stop**. Report the failing check and the last lines of its output. Do not push.
 
 4. **Push the branch.** `git push -u origin <branch>`. Retry only on network errors, up to 4 times, waiting 2, 4, 8, then 16 seconds.
