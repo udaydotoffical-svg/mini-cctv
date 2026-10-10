@@ -24,30 +24,27 @@ That leaves **WiFi**. Bruce's JS has exactly the two calls this needs: `wifi.htt
 
 | Path | What |
 |---|---|
-| `firmware/` | PlatformIO project for the S3 camera node (AP + `/jpg`, `/stream`, `/status`) |
+| `firmware/mini_cctv/` | Arduino sketch for the S3 camera node (AP + `/jpg`, `/stream`, `/status`); `firmware/platformio.ini` builds it too |
 | `bruce/MiniCCTV.js` | The Bruce app |
 | `tools/fake_cam.py` | Fake camera server, to test the Stick without the S3 |
 | `tools/test_app.js` | Host-side test of `MiniCCTV.js` against the fake camera |
 
 ## Setup
 
-### 1. Flash the camera
+### 1. Flash the camera (Arduino IDE)
 
-```bash
-cd firmware
-pip install platformio
-pio run -e s3cam -t upload      # pick the env for your board, see below
-pio device monitor
-```
+Open `firmware/mini_cctv/mini_cctv.ino` (the three files in that folder go together). No extra libraries: the camera driver ships with the ESP32 board package.
 
-| env | board |
+| Tools menu | Setting |
 |---|---|
-| `s3cam` | ESP32-S3-WROOM CAM with octal PSRAM (N8R8 / N16R8): Freenove WROOM CAM, ESP32-S3-EYE, most clones |
-| `s3cam_qspi` | same pinout, quad PSRAM (N8R2 / N4R2) |
-| `s3cam_lcd` | boards with the `ESP32S3_CAM_LCD` pinout (XCLK 40, SIOD 17) |
-| `xiao_s3` | Seeed XIAO ESP32S3 Sense |
+| Board | `XIAO_ESP32S3` (or `ESP32S3 Dev Module` for a generic S3 CAM board) |
+| **PSRAM** | **`OPI PSRAM`**. Required: with PSRAM disabled the sketch stops at boot |
+| USB CDC On Boot | `Enabled` (so the Serial Monitor works on native-USB boards like the XIAO) |
+| Flash Size / Partition / CPU | 8MB or more / default / 240MHz |
 
-Another board? Add a pin block to `firmware/include/camera_pins.h`. `CAM_VFLIP` is on by default (the ESP32-S3-EYE sensor is mounted upside down); if the picture is still wrong, change `CAM_VFLIP` / `CAM_HMIRROR` in `config.h`. If the monitor says "PSRAM not found", you picked the wrong octal/quad env.
+Camera pins: at the top of `mini_cctv.ino`, choose `CAMERA_MODEL_ESP32S3_EYE` (default; Freenove WROOM CAM and most S3 CAM clones), `CAMERA_MODEL_XIAO_ESP32S3` (XIAO ESP32S3 Sense) or `CAMERA_MODEL_ESP32S3_CAM_LCD`. For another board, add a pin block to `camera_pins.h`. `CAM_VFLIP` is on by default (the S3-EYE sensor is mounted upside down); if the picture is still wrong, change `CAM_VFLIP` / `CAM_HMIRROR` in `config.h`.
+
+PlatformIO also works: `cd firmware && pio run -e s3cam -t upload`, with envs `s3cam`, `s3cam_qspi`, `s3cam_lcd` and `xiao_s3`. It builds the same sketch folder.
 
 On boot the camera starts a WiFi network **`ESP32-CAM-S3`** (password `12345678`, same as your CameraWebServer sketch; change both in `config.h`). Join it from a phone and open `http://192.168.4.1/` to see the feed and check the camera works before involving the Stick.
 
@@ -88,6 +85,6 @@ You can also point a real Stick at the fake camera: run it on a laptop, set `CAM
   - The Bruce API contract, read from `pr3y/Bruce` at `a59213f`: `httpFetch` binary, `drawJpg(Uint8Array)`, memory sizing, and `Content-Length` handling.
   - `MiniCCTV.js` against the mock harness above.
 - **Not verified:**
-  - The firmware has not been run on a real camera.
+  - The firmware has not been run on a real camera. It compiles on Arduino-ESP32 core 2.0.17 (via PlatformIO). I couldn't fetch core 3.x in my sandbox, so a 3.x build is unchecked, though it only uses APIs from the stock CameraWebServer example.
   - `MiniCCTV.js` has not been run on a real Stick. The mock harness is not mquickjs, so check the first run on the device.
 - **Needs a current Bruce.** It must be a build with the mquickjs interpreter, where `drawJpg` accepts a `Uint8Array` and `httpFetch` accepts `responseType: 'binary'`. An older Bruce won't work, so update from the Bruce web flasher if the script errors on those calls.

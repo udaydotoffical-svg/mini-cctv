@@ -15,11 +15,11 @@ var keyboard = require('keyboard');
 var wifi = require('wifi');
 
 // ------------------------------- config ------------------------------------
-var CAM_SSID = 'ESP32-CAM-S3'; // must match CCTV_AP_SSID in firmware/include/config.h
+var CAM_SSID = 'ESP32-CAM-S3'; // must match CCTV_AP_SSID in firmware/mini_cctv/config.h
 var CAM_PASS = '12345678'; // must match CCTV_AP_PASS
 var CAM_URL = 'http://192.168.4.1/jpg';
 var JOIN_CAM_WIFI = true; // false = Stick is already on the same network as the camera
-var FRAME_W = 240; // must match OUT_W / OUT_H in firmware/include/config.h
+var FRAME_W = 240; // must match OUT_W / OUT_H in firmware/mini_cctv/config.h
 var FRAME_H = 128;
 var MAX_FAILS = 5; // consecutive bad frames before we reconnect
 // ----------------------------------------------------------------------------

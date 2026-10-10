@@ -1,4 +1,20 @@
-// mini-cctv camera node
+// mini-cctv camera node  (Arduino IDE sketch; also builds with PlatformIO, see ../platformio.ini)
+//
+// Arduino IDE > Tools settings:
+//   Board:             XIAO_ESP32S3  (or "ESP32S3 Dev Module" for a generic S3 CAM board)
+//   PSRAM:             "OPI PSRAM"   <- required, the sketch stops at boot without it
+//   USB CDC On Boot:   "Enabled"     (XIAO / native-USB boards, so Serial Monitor works)
+//   Flash Size 8MB+, Partition Scheme: default is fine, CPU 240MHz
+//
+// Camera pins: pick the model below (or in a build flag). Default is the
+// ESP32-S3-EYE pinout (Freenove WROOM CAM and most S3 CAM clones). For a
+// Seeed XIAO ESP32S3 Sense use CAMERA_MODEL_XIAO_ESP32S3.
+#if !defined(CAMERA_MODEL_ESP32S3_EYE) && !defined(CAMERA_MODEL_XIAO_ESP32S3) && !defined(CAMERA_MODEL_ESP32S3_CAM_LCD)
+#define CAMERA_MODEL_ESP32S3_EYE
+//#define CAMERA_MODEL_XIAO_ESP32S3
+//#define CAMERA_MODEL_ESP32S3_CAM_LCD
+#endif
+
 //
 // Pipeline (runs continuously in captureTask):
 //   OV sensor -> RGB565 QVGA (320x240) -> crop + downscale to OUT_W x OUT_H
@@ -273,7 +289,7 @@ void setup() {
     Serial.println("\nmini-cctv camera node");
 
     if (!psramFound()) {
-        Serial.println("PSRAM not found: check the env in platformio.ini (qio_opi vs qio_qspi)");
+        Serial.println("PSRAM not found: Arduino IDE > Tools > PSRAM = \"OPI PSRAM\" (PlatformIO: qio_opi vs qio_qspi env)");
         for (;;) delay(1000);
     }
     g_scaled = (uint16_t *)heap_caps_malloc((size_t)OUT_W * OUT_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
