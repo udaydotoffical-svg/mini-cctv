@@ -43,7 +43,8 @@ The screens follow the **Knowura design language**: dark ground with the faint g
 
 | | |
 |---|---|
-| ![Main menu](docs/screens/menu_connected.png) | ![Settings](docs/screens/settings.png) |
+| ![Main menu](docs/screens/menu_connected.png) | ![Camera screen](docs/screens/camera_photo.png) |
+| ![Settings](docs/screens/settings.png) | ![Recording from the camera screen](docs/screens/camera_recording.png) |
 | ![Live view](docs/screens/viewer_toast.png) | ![Guard mode](docs/screens/guard.png) |
 | ![Camera mode](docs/screens/mode_picker.png) | ![Problem notice](docs/screens/cannot_connect.png) |
 
@@ -54,13 +55,37 @@ The screens follow the **Knowura design language**: dark ground with the faint g
 | Item | |
 |---|---|
 | **Watch live** | the picture |
+| **Camera** | a camera screen: viewfinder corners, a shutter ring, and four ways to shoot (below) |
 | **Guard mode** | the screen goes (nearly) dark and the Stick listens for motion. On motion it wakes, alerts, shows what's happening, and goes dark again 15 s after things settle |
 | **Photos & clips** | browse what's on the camera's SD card and view it on the Stick |
-| **Camera** | filter, night, flip, brightness, zoom/pan: the things you adjust while looking at the picture |
+| **Image** | filter, night, flip, brightness, zoom/pan: the things you adjust while looking at the picture |
 | **Settings** | what the app and the camera start with (below) |
 | **Exit** | |
 
 While the main menu is open and the Stick is on the camera's WiFi, it still watches for motion (MOTION! screen + alert), so you don't have to be in Guard mode.
+
+### Camera screen
+
+Main menu → **Camera**. The live picture with a viewfinder over it: white corner brackets, the shooting mode top-left, a shutter ring at the bottom and a counter (shots, or the running time while a video records).
+
+| Button | Does |
+|---|---|
+| **UP** or **M5** | the shutter |
+| **DOWN** | next shooting mode |
+| **UP + DOWN** | back to the main menu |
+
+| Mode | The shutter |
+|---|---|
+| **Photo** | one photo (the full 640x480 picture, saved to the SD card) |
+| **Burst** | six photos in a row |
+| **Timer** | counts 3, 2, 1, then takes one |
+| **Video** | starts a clip; press again to stop it (the ring turns red while recording) |
+
+Without an SD card each mode says so and does nothing. Photos and clips land in the same folders as everything else, so they show up under **Photos & clips**.
+
+### Nothing blinks
+
+The picture is only ever sent as 8-bit bands that are drawn in place, and the app never fills the screen with a bright colour: no shutter flash, no red alarm fill. Bruce's JPEG drawing blanks its area to black before painting, which shows as blinking, so the app does not use it at all (the camera can still serve JPEGs to a browser). A test fails if anything draws a JPEG or fills a large area with a bright colour. The one thing left that pulses is the red LED, once per motion event, at most every few seconds; set Settings → Alerts to Off if you want it dark.
 
 ### Settings
 
@@ -69,13 +94,14 @@ Main menu → **Settings**. Changes apply straight away and are remembered.
 | Row | Choices | Stored |
 |---|---|---|
 | **Auto-record** | On / Off: record a clip for every motion event (it applies in Security mode) | on the camera |
-| **Picture** | **Fast** or **Photo**: the view the live picture starts in. Photo = 16-bit colour, moving areas blink briefly. Fast = 8-bit dithered, never blinks | on the Stick |
 | **Alerts** | Off / LED / Beep+LED: what the Stick does on motion | on the Stick |
 | **Info line** | On / Off: fps and timings on the live picture | on the Stick |
 | **Mode** | Live, Guard, Security, Continuous, Timelapse | on the camera |
 | **Timelapse** | 10 s, 30 s, 1 m, 5 m, 15 m, 1 h | on the camera |
+| **Person box** | On / Off: draw a box around whatever is moving, **red** if it is person-sized, **cyan** for anything else. Drawn by the camera into the picture, so it follows zoom and pan | on the camera |
+| **Sharpen** | On / Off: a mild sharpening before the picture is squeezed into 256 colours, for crisper edges | on the camera |
 
-The Stick's choices live in `/MiniCCTV.cfg` on its internal storage (a small JSON file; a damaged or out-of-range file is ignored and the defaults are used). The actions menu in the live viewer can still flip Picture, Info line and Mode on the spot; those are for the current session, only Settings changes the defaults. The camera rows show `...` until the app has talked to the camera once; selecting one connects first. The Stick-side rows work with the camera off.
+The Stick's choices live in `/MiniCCTV.cfg` on its internal storage (a small JSON file; a damaged or out-of-range file is ignored and the defaults are used). The actions menu in the live viewer can still flip Info and Mode on the spot; the Info flip is for the current session, only Settings changes the default. The camera rows show `...` until the app has talked to the camera once; selecting one connects first. The Stick-side rows work with the camera off.
 
 ### Buttons
 
@@ -88,9 +114,9 @@ The Stick's choices live in `/MiniCCTV.cfg` on its internal storage (a small JSO
 | Photo / clip playback | back | skip 10 s | menu: play/pause, ±10 s |
 | | **UP + DOWN together: back out of a menu; in the viewer or main menu, quit the app** | | |
 
-The **actions menu** (M5 in the live viewer): Resume, Photo, Record clip / Stop recording, Zoom / Pan, Rewind (DVR), Filter, Night, Mode, Picture, Info, Main menu.
+The **actions menu** (M5 in the live viewer): Resume, Photo, Record clip / Stop recording, Zoom / Pan, Rewind (DVR), Filter, Night, Mode, Info, Main menu.
 
-The **info line** at the top of the picture shows the picture mode, updates per second (`still` when nothing changes) and milliseconds spent on the network and drawing (`net/draw`). The right edge has a motion meter (cyan; red when the moving area is person-sized), a red `REC` while recording, and a red `NO SD` when there's no card. Errors show in red in the info chip.
+The **info line** at the top of the picture shows `LIVE`, the updates per second (`still` when nothing changes) and milliseconds spent on the network and drawing (`net/draw`). The right edge has a motion meter (cyan; red when the moving area is person-sized), a red `REC` while recording, and a red `NO SD` when there's no card. Errors show in red in the info chip.
 
 ### Alerts
 
@@ -135,7 +161,7 @@ Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's
 
 Copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick's SD card, or upload it through the Bruce WebUI. It joins the camera's WiFi itself. The config block at the top must agree with `config.h` (SSID, password, `OUT_W`/`OUT_H`); if it doesn't, the app says so instead of drawing garbage. It needs a Bruce with the mquickjs interpreter (`drawJpg`/`drawBitmap` taking a `Uint8Array`, `httpFetch` with `responseType: 'binary'`).
 
-**Memory:** the app needs about 84 KB of the interpreter's heap when loaded (the pixel icons, the UI toolkit) and about 136 KB at peak while streaming. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
+**Memory:** the app needs about 92 KB of the interpreter's heap when loaded (the pixel icons, the UI toolkit) and about 142 KB at peak while streaming. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
 
 ### Using your router instead
 
@@ -147,7 +173,7 @@ Set `USE_STA 1` and your SSID and password in `config.h`. Read the IP from the s
 |---|---|
 | `DEFAULT_MODE`, `TIMELAPSE_SEC` | the mode on the very first boot, and the timelapse interval |
 | `CAM_FRAMESIZE` | `FRAMESIZE_VGA` (default, sharper) or `FRAMESIZE_QVGA` (faster, softer) |
-| `STRIP_JPEG_QUALITY` | Photo mode quality |
+| `STRIP_JPEG_QUALITY` | quality of the JPEG strips served to browsers (the Stick does not use them) |
 | `DELTA_PIX_THRESH`, `DELTA_PIX_COUNT`, `DELTA_MEAN_THRESH` | how much a band must change before it's resent (raise if a still scene keeps updating) |
 | `MOTION_LUMA_THRESH`, `MOTION_MIN_CELLS`, `MOTION_BIG_TENTHS`, `MOTION_GLOBAL_PCT`, `MOTION_HOLD_MS` | motion sensitivity, the "person-sized" threshold, ignoring lights switching on, how long motion stays active |
 | `REC_*`, `PHOTO_JPEG_QUALITY`, `SD_MIN_FREE_MB` | clip size, frame rate, quality, lengths, and when old clips are deleted |
@@ -157,7 +183,7 @@ Set `USE_STA 1` and your SSID and password in `config.h`. Read the IP from the s
 
 - **Bands.** The 240x135 picture is cut into nine bands of 16 rows (the JPEG block height). Each time the picture changes the camera numbers the update (`seq`) and remembers, per band, when it last changed. The Stick asks "what changed since update N?" (`/d?f=j&s=N`) and gets only those bands plus the new `seq`. A lost reply is repaired by asking again; a camera that reboots counts from 1 again, which the Stick notices. The format is in `firmware/mini_cctv/delta.h`; every reply's header also carries the motion level and flags (recording, SD present, person-sized, motion active, replay).
 - **Long-polling.** If nothing has changed the camera holds the request open for up to 150 ms, so a quiet scene costs almost no traffic and changes show up as they happen.
-- **Why bands.** Bruce's `drawJpg` clears the area it paints before decoding into it, so a full-frame JPEG flashes the whole screen. Bands that only touch what moved keep the flash local (Photo) or remove it (Fast, 8-bit `drawBitmap`, which paints in place). Note that Bruce's `drawBitmap` at 16 bits would be drawn as a 1-bit bitmap on the Stick's display library, and a `subarray` view passed to a draw call is drawn from the start of its buffer, so the app copies each band into its own array first.
+- **Why bands, and why 8-bit.** Bruce's `drawJpg` clears the area it paints to black before decoding into it, so any JPEG blinks, and `drawBitmap` only supports 8-bit colour (RGB332) in place. So the picture is 8-bit bands that paint in place and only the bands that changed are sent. Note that Bruce's `drawBitmap` at 16 bits would be drawn as a 1-bit bitmap on the Stick's display library, and a `subarray` view passed to a draw call is drawn from the start of its buffer, so the app copies each band into its own array first.
 - **A view override** replaces the live picture with a rewound frame, a photo or a clip. Because it goes through the same band pipeline, the Stick needs no special code to show them.
 - **Motion** is measured on an 80x60 brightness grid of the whole sensor picture against a slowly adapting background, independent of zoom and filters. Most of the picture changing at once (lights, auto-exposure) is ignored.
 - **Recording** runs on its own writer task fed through a small pool of buffers, so a slow SD card can never stall the camera or the Stick; if the card falls behind, video frames are dropped, not the live picture.
@@ -172,8 +198,8 @@ tools/run_tests.sh
 Needs g++, Python 3 with Pillow, and Node; ffmpeg and git/gcc/make are used if present. It runs:
 
 - **C++ tests under AddressSanitizer** (`tools/test_scaler.cpp`, `test_features.cpp`, `test_delta.cpp`, `test_avi.cpp`): scaling, dithering, change detection, zoom/pan, filters, motion detection, the DVR ring buffer, recording rules, the mode table, the band protocol and the AVI writer/reader. `ffprobe` and `ffmpeg` then independently check that a written clip is a valid MJPEG file that decodes and seeks.
-- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 24 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own. Settings get their own scenarios: auto-record, defaults saved and reloaded, damaged or out-of-range files, storage that throws, and the camera being off.
-- `node tools/mutate.js <golden_dir>` breaks the app 32 different ways, one at a time, and checks that the suite notices each (it does: 32 of 32). A mutant that survives would mean a test that proves nothing.
+- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 27 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own. Settings get their own scenarios: auto-record, defaults saved and reloaded, damaged or out-of-range files, storage that throws, and the camera being off.
+- `node tools/mutate.js <golden_dir>` breaks the app 37 different ways, one at a time (including putting the flashing back), and checks that the suite notices each (it does: 37 of 37). A mutant that survives would mean a test that proves nothing.
 - `node tools/ui_preview.js` renders the screens above to `docs/screens/` by running the real app against a software model of Bruce's display (the same 5x7 font and round-rect maths as TFT_eSPI). It also counts anything drawn off-screen.
 - `node tools/mq_footprint.js <mqjs>` measures the app's JS heap use on that engine.
 - `node tools/fake_cam_server.js` serves the fake camera over HTTP so a real Stick can be tried against a laptop (set `CAM_HOST` to the laptop and `JOIN_CAM_WIFI = false`).

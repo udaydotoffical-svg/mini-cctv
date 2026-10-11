@@ -37,6 +37,10 @@ struct MotionResult {
     bool big;
     bool active;
     bool global;
+    // Where the movement is, in grid cells (inclusive), when this frame counts as motion. Stray
+    // single cells (sensor noise) are ignored: a column or row needs 2+ moving cells to count.
+    bool hasBox;
+    int bx0, by0, bx1, by1;
 };
 
 // Average brightness of each grid cell of a big-endian RGB565 picture (2x2 samples per cell).
@@ -71,7 +75,7 @@ struct MotionDetector {
     }
 
     MotionResult update(const uint8_t *grid, uint32_t nowMs, const MotionParams &p) {
-        MotionResult r = {0, 0, false, active, false};
+        MotionResult r = {0, 0, false, active, false, false, 0, 0, 0, 0};
         if (!init) {
             for (int i = 0; i < MOTION_CELLS; i++) bg[i] = (int16_t)(grid[i] * 16);
             init = true;
@@ -112,6 +116,16 @@ struct MotionDetector {
         r.big = candidate && changed * 1000 >= p.bigTenths * MOTION_CELLS;
         const int lv = changed * 100 * 6 / MOTION_CELLS; // 16% of the picture moving = 100
         r.level = candidate ? (lv > 100 ? 100 : (lv < 1 ? 1 : lv)) : 0;
+        if (candidate) {
+            int cols[MOTION_GW] = {0}, rows[MOTION_GH] = {0};
+            for (int y = 0; y < MOTION_GH; y++)
+                for (int x = 0; x < MOTION_GW; x++)
+                    if (moved[y * MOTION_GW + x]) { cols[x]++; rows[y]++; }
+            int x0 = -1, x1 = -1, y0 = -1, y1 = -1;
+            for (int x = 0; x < MOTION_GW; x++) if (cols[x] >= 2) { if (x0 < 0) x0 = x; x1 = x; }
+            for (int y = 0; y < MOTION_GH; y++) if (rows[y] >= 2) { if (y0 < 0) y0 = y; y1 = y; }
+            if (x0 >= 0 && y0 >= 0) { r.hasBox = true; r.bx0 = x0; r.by0 = y0; r.bx1 = x1; r.by1 = y1; }
+        }
         return r;
     }
 };

@@ -11,6 +11,14 @@
 var W = 240;
 var H = 135;
 var CLOCK = 1000000;
+// is this 565 colour bright enough that filling a big area with it would flash?
+function bright(c) {
+  var r = ((c >> 11) & 31) * 8;
+  var g = ((c >> 5) & 63) * 4;
+  var b = (c & 31) * 8;
+  return (r * 77 + g * 150 + b * 29) / 256 > 60;
+}
+
 function rgb565(r, g, b) {
   return ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
 }
@@ -128,7 +136,7 @@ function runApp(opts) {
     texts: [], titles: [], menuDraws: 0, jpgs: [], bitmaps: [], urls: [], tones: [], blinks: 0, irs: [],
     joins: 0, disconnects: 0, brightness: [], restores: 0, fills: 0, ticks: 0, maxTicks: opts.maxTicks || 30000,
     timeout: false, error: '', fb: new Uint8Array(opts.light ? 1 : W * H), noSignal: 0, jpgCount: 0, bitmapCount: 0,
-    files: opts.files || {}, writes: 0, icons: 0, gradients: 0
+    files: opts.files || {}, writes: 0, icons: 0, gradients: 0, flashes: 0
   };
   var curSize = 1;
   var curColor = 0;
@@ -172,6 +180,9 @@ function runApp(opts) {
     color: function (r, g, b) { return ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3); },
     fill: function (c) {
       L.fills++;
+      if (bright(c)) {
+        L.flashes++;
+      }
       if (!opts.light) {
         for (var i = 0; i < L.fb.length; i++) { L.fb[i] = 0; }
       }
@@ -193,8 +204,17 @@ function runApp(opts) {
         L.noSignal++;
       }
     },
-    drawFillRect: function () {},
-    drawFillRoundRect: function () {},
+    // a big bright rectangle is a flash on the Stick's screen
+    drawFillRect: function (x, y, w, h, c) {
+      if (w * h >= (W * H) / 3 && bright(c)) {
+        L.flashes++;
+      }
+    },
+    drawFillRoundRect: function (x, y, w, h, r, c) {
+      if (w * h >= (W * H) / 3 && bright(c)) {
+        L.flashes++;
+      }
+    },
     drawRect: function () {},
     drawRoundRect: function () {},
     drawFastHLine: function () {},
@@ -348,27 +368,23 @@ function frameEquals(fb, expected) {
   return -1;
 }
 
-// Key helpers: the main menu is Watch live(0) Guard(1) Photos&clips(2) Camera(3) Settings(4) Exit(5);
-// Settings is Auto-record(0) Picture(1) Alerts(2) Info line(3) Mode(4) Timelapse(5) Back(6).
+// Key helpers: the main menu is Watch live(0) Camera(1) Guard(2) Photos&clips(3) Image(4) Settings(5) Exit(6);
+// Settings is Auto-record(0) Alerts(1) Info line(2) Mode(3) Timelapse(4) Person box(5) Sharpen(6) Back(7).
 // 'next' = DOWN, 'prev' = UP, 'sel' = M5, 'esc' = UP+DOWN together.
 function T(name) {
   return function (l) { return has(l.titles, name); };
 }
 
-// Settings -> Picture -> Fast, back out, and into Watch live
-function toFastWatch() {
-  return toSettings().concat([
-    { when: null, key: 'sel' }, { when: null, key: 'esc' },
-    { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
-    { when: null, key: 'sel' }
-  ]);
+// straight into Watch live
+function toWatch() {
+  return [{ when: MENU(1), key: 'sel' }];
 }
 
 // from the first main menu draw to the Settings screen
 function toSettings() {
   return [
-    { when: MENU(1), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
-    { when: null, key: 'sel' }, { when: T('Settings'), key: 'next' }
+    { when: MENU(1), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+    { when: null, key: 'sel' }, { when: T('Settings'), key: 'next' }       // ...and one row down, on Alerts
   ];
 }
 
@@ -385,48 +401,42 @@ SCENARIOS.menu_and_exit = function () {
   check('screen brightness is restored on the way out', L.restores >= 1);
 };
 
-SCENARIOS.watch_photo_mode = function () {
+SCENARIOS.watch_live_bands = function () {
   FC.reset({ autoMotion: true });
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 30; }, key: 'prev' },
+      { when: function (l) { return l.bitmaps.length >= 30; }, key: 'prev' },
       { when: MENU(2), key: 'esc' }
     ])
   });
   check('app ran without throwing', L.error === '', L.error);
   check('joined the camera WiFi once', L.joins === 1, '(' + L.joins + ')');
   check('connect order: status, then the control state, then pictures',
-    /\/status$/.test(L.urls[0]) && /\/ctl\?$/.test(L.urls[1]) && /\/d\?f=j&s=0$/.test(L.urls[2]), L.urls.slice(0, 3).join(' '));
-  check('Photo mode draws whole JPEG strips at band boundaries',
-    L.jpgs.length >= 30 && L.jpgs.every(function (j) { return j.x === 0 && j.y % 16 === 0 && j.y <= 128 && j.b0 === 0xff && j.b1 === 0xd8; }));
-  check('the first picture paints all 9 bands', (function () { var s = {}; for (var i = 0; i < 9; i++) { s[L.jpgs[i].y] = 1; } return Object.keys(s).length === 9; })());
-  check('later updates only send the bands that moved', L.jpgs.length < 9 * 12);
-  check('requests ask what changed since the last seen update', countUrls(L, /\/d\?f=j&s=[1-9]/) > 3);
+    /\/status$/.test(L.urls[0]) && /\/ctl\?$/.test(L.urls[1]) && /\/d\?f=8&s=0$/.test(L.urls[2]), L.urls.slice(0, 3).join(' '));
+  check('the picture is drawn as 8-bit bands at band boundaries, full width',
+    L.bitmaps.length >= 30 && L.bitmaps.every(function (b) { return b.x === 0 && b.y % 16 === 0 && b.y <= 128 && b.w === 240; }));
+  check('the first picture paints all 9 bands', (function () { var s = {}; for (var i = 0; i < 9; i++) { s[L.bitmaps[i].y] = 1; } return Object.keys(s).length === 9; })());
+  check('later updates only send the bands that moved', L.bitmaps.length < 9 * 12);
+  check('requests ask what changed since the last seen update', countUrls(L, /\/d\?f=8&s=[1-9]/) > 3);
   check('UP leaves the viewer and returns to the main menu', L.menuDraws >= 2);
   check('with an SD card there is no warning', !has(L.titles, 'No SD card') && !anyText(L, /^NO SD$/));
+  check('the live picture never uses JPEG drawing (it blanks the area to black first: a blink)', L.jpgCount === 0 && countUrls(L, /\/d\?f=j/) === 0);
 };
 
 SCENARIOS.watch_fast_mode_is_exact = function () {
   FC.reset({ autoMotion: true });
   var L = runApp({
-    keys: script([
-      { when: MENU(1), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
-      { when: null, key: 'sel' },                    // Settings
-      { when: T('Settings'), key: 'next' },          // -> Picture
-      { when: null, key: 'sel' },                    // Photo -> Fast
-      { when: null, key: 'esc' },                    // back to the main menu (cursor on Settings)
-      { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
-      { when: null, key: 'sel' },                    // Watch live
+    keys: script(toWatch().concat([
       { when: function (l) { return l.bitmaps.length >= 45; }, run: function (l) { l.snap = new Uint8Array(l.fb); l.want = FC.expectedFrame(); }, key: 'prev' },
       { when: null, key: 'esc' }
-    ])
+    ]))
   });
   check('app ran without throwing', L.error === '', L.error);
-  check('Fast mode draws raw 8-bit bands of the right size', L.bitmaps.length >= 45 && L.bitmaps[8].h === 7 && L.bitmaps[0].h === 16 && L.jpgs.length === 0);
+  check('it draws raw 8-bit bands of the right size', L.bitmaps.length >= 45 && L.bitmaps[8].h === 7 && L.bitmaps[0].h === 16 && L.jpgCount === 0);
   var bad = frameEquals(L.snap, L.want);
   check('the Stick screen equals the camera picture (deltas applied correctly)', bad === -1, bad === -1 ? '' : '(first mismatch at pixel ' + bad + ')');
-  check('Fast requests use f=8', countUrls(L, /\/d\?f=8&s=/) > 5 && countUrls(L, /\/d\?f=j/) === 0);
+  check('requests use f=8', countUrls(L, /\/d\?f=8&s=/) > 5 && countUrls(L, /\/d\?f=j/) === 0);
 };
 
 SCENARIOS.no_sd_warns_but_plays_live = function () {
@@ -434,7 +444,7 @@ SCENARIOS.no_sd_warns_but_plays_live = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'next' },     // DOWN: photo
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'next' },     // DOWN: photo
       { when: function (l) { return anyText(l, /No SD card: cannot save/); }, key: 'sel' },  // M5: actions
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' },
       { when: function (l) { return true; }, key: 'next' },
@@ -446,7 +456,7 @@ SCENARIOS.no_sd_warns_but_plays_live = function () {
   });
   check('app ran without throwing', L.error === '', L.error);
   check('a No SD warning is shown on connect', has(L.titles, 'No SD card'));
-  check('...but it does not block: live pictures arrive', L.jpgs.length >= 12);
+  check('...but it does not block: live pictures arrive', L.bitmaps.length >= 12);
   check('a "NO SD" tag stays on the live picture', anyText(L, /^NO SD$/));
   check('taking a photo says there is no card instead of asking the camera', anyText(L, /No SD card: cannot save/) && countUrls(L, /snap=1/) === 0);
   check('recording says there is no card instead of asking the camera', anyText(L, /No SD card: cannot record/) && countUrls(L, /rec=t/) === 0);
@@ -454,10 +464,10 @@ SCENARIOS.no_sd_warns_but_plays_live = function () {
 
 SCENARIOS.no_sd_security_mode_warning = function () {
   FC.reset({ sd: 0, mode: 2 });
-  var L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+  var L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('Security mode without a card says it wants one', anyText(L, /Security mode wants a card/));
   FC.reset({ sd: 0, mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('Live mode without a card does not nag about recording', has(L.titles, 'No SD card') && !anyText(L, /mode wants a card/));
 };
 
@@ -466,7 +476,7 @@ SCENARIOS.photo_and_record = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'next' },                        // DOWN: photo
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'next' },                        // DOWN: photo
       { when: function (l) { return anyText(l, /Saved IMG_0043.jpg/); }, key: 'sel' },            // M5
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' },
       { when: null, key: 'next' },
@@ -491,7 +501,7 @@ SCENARIOS.action_menu_camera_settings = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'sel' },
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },                                                // Filter
@@ -520,7 +530,7 @@ SCENARIOS.timelapse_interval = function () {
   FC.reset({ mode: 2, tl: 60 });
   var L = runApp({
     keys: script(toSettings().concat([
-      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },   // Picture(1) -> Alerts -> Info line -> Mode (4)
+      { when: null, key: 'next' }, { when: null, key: 'next' },                  // Alerts(1) -> Info line -> Mode (3)
       { when: null, key: 'sel' },                                               // Mode -> picker (connects first)
       { when: T('Camera mode'), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },                                               // Timelapse mode
@@ -540,7 +550,7 @@ SCENARIOS.zoom_and_pan = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'sel' },
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },                                               // Zoom / Pan
       { when: function (l) { return anyText(l, /ZOOM 1x/); }, key: 'prev' },    // UP = zoom in (+0.5x)
@@ -572,7 +582,7 @@ SCENARIOS.rewind = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'sel' },
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },                                               // Rewind (DVR)
       { when: function (l) { return FC.state().ov === 1; }, key: 'prev' },      // older
@@ -591,7 +601,7 @@ SCENARIOS.rewind = function () {
   L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 12; }, key: 'sel' },
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },
       { when: function (l) { return has(l.titles, 'Camera'); }, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
       { when: null, key: 'sel' },
       { when: function (l) { return anyText(l, /rewind needs Guard or Security/); }, key: 'prev' },
@@ -606,17 +616,18 @@ SCENARIOS.gallery_photos_and_clips = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' },
-      { when: MENU(3), key: 'sel' },                                            // Photos & clips
+      { when: MENU(3), key: 'next' },
+      { when: MENU(4), key: 'sel' },                                            // Photos & clips
       { when: function (l) { return has(l.titles, 'Photos & clips'); }, key: 'sel' },   // Photos
       { when: function (l) { return has(l.titles, 'Photos'); }, key: 'next' },
       { when: null, key: 'sel' },                                               // the second photo
-      { when: function (l) { return FC.state().ov === 2 && l.jpgs.length >= 12; }, key: 'prev' },  // UP back
+      { when: function (l) { return FC.state().ov === 2 && l.bitmaps.length >= 12; }, key: 'prev' },  // UP back
       { when: function (l) { return FC.state().ov === 0; }, key: 'esc' },       // leave the list
       { when: null, key: 'next' },                                              // -> Clips
       { when: null, key: 'sel' },
       { when: function (l) { return has(l.titles, 'Clips'); }, key: 'next' },
       { when: null, key: 'sel' },                                               // the second clip
-      { when: function (l) { return FC.state().ov === 3 && l.jpgs.length >= 30; }, key: 'sel' },  // M5: playback menu
+      { when: function (l) { return FC.state().ov === 3 && l.bitmaps.length >= 30; }, key: 'sel' },  // M5: playback menu
       { when: function (l) { return has(l.titles, 'Playback'); }, key: 'next' },
       { when: null, key: 'sel' },                                               // Forward 10 s
       { when: function (l) { return FC.state().cpos === 10; }, key: 'esc' },    // close the menu
@@ -637,12 +648,12 @@ SCENARIOS.gallery_photos_and_clips = function () {
   check('the camera ends up live again', FC.state().ov === 0);
 
   FC.reset({ sd: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'sel' },
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'sel' },
     { when: function (l) { return has(l.titles, 'Photos & clips'); }, key: 'sel' }, { when: function (l) { return has(l.titles, 'No SD card'); }, key: 'prev' },
     { when: null, key: 'esc' }, { when: MENU(2), key: 'esc' }]) });
   check('the gallery says so (and does not crash) when the camera has no card', has(L.titles, 'No SD card') && L.error === '');
   FC.reset({ photos: [] });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'sel' },
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'next' }, { when: MENU(4), key: 'sel' },
     { when: function (l) { return has(l.titles, 'Photos & clips'); }, key: 'sel' }, { when: function (l) { return has(l.titles, 'No photos yet'); }, key: 'prev' },
     { when: null, key: 'esc' }, { when: MENU(2), key: 'esc' }]) });
   check('an empty card says "No photos yet"', has(L.titles, 'No photos yet'));
@@ -653,28 +664,29 @@ SCENARIOS.guard_mode = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'next' },
-      { when: MENU(2), key: 'sel' },                                            // Guard mode
+      { when: MENU(2), key: 'next' },
+      { when: MENU(3), key: 'sel' },                                            // Guard mode
       { when: function (l) { return has(l.brightness, 2); }, run: function () { FC.state().mseq = 1; FC.state().big = 1; FC.state().motion = 1; FC.state().lv = 40; } },
       { when: function (l) { return l.tones.length >= 3; }, run: function () { FC.state().motion = 0; FC.state().lv = 0; FC.state().big = 0; } },
-      { when: function (l) { return countUrls(l, /\/d\?f=j/) > 100 && l.brightness.length >= 3; }, key: 'prev' },   // after the auto-return
+      { when: function (l) { return countUrls(l, /\/d\?f=8/) > 100 && l.brightness.length >= 3; }, key: 'prev' },   // after the auto-return
       { when: MENU(2), key: 'esc' }
     ])
   });
   check('app ran without throwing', L.error === '' && !L.timeout, L.error);
   check('the screen is dimmed while guarding', L.brightness[0] === 2);
   check('a person-sized event sounds three beeps and blinks the LED', L.tones.length === 3 && L.blinks === 1, '(' + L.tones.length + ' tones, ' + L.blinks + ' blinks)');
-  check('the event wakes the screen and shows the live picture', has(L.brightness, 'restore') && L.jpgs.length > 0);
+  check('the event wakes the screen and shows the live picture', has(L.brightness, 'restore') && L.bitmaps.length > 0);
   check('it dims again once things go quiet, with no key pressed', L.brightness.slice(0, 3).join(',') === '2,restore,2', '(brightness calls: ' + L.brightness.join(',') + ')');
   check('UP leaves guard mode and restores the brightness', L.brightness[L.brightness.length - 1] === 'restore' && L.brightness[L.brightness.length - 2] === 'restore' && L.menuDraws >= 2);
   check('guard polls the camera with the motion counter', countUrls(L, /\/m\?s=0$/) >= 1);
 
   // a camera in Live mode can't guard: offer to switch it
   FC.reset({ mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'sel' },
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'sel' },
     { when: function (l) { return FC.state().mode === 2 && has(l.brightness, 2); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('Guard on a Live-mode camera offers to switch it to Security, and does', has(L.titles, 'Arm guard?') && FC.state().mode === 2);
   FC.reset({ mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'next' }, { when: MENU(3), key: 'sel' }, { when: function (l) { return has(l.titles, 'Arm guard?'); }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('...or you can say no (mode stays, screen never dimmed)', FC.state().mode === 0 && !has(L.brightness, 2));
 };
 
@@ -684,11 +696,12 @@ SCENARIOS.guard_survives_camera_reboot = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'next' },
-      { when: MENU(2), key: 'sel' },                                            // Guard mode
+      { when: MENU(2), key: 'next' },
+      { when: MENU(3), key: 'sel' },                                            // Guard mode
       { when: function (l) { return has(l.brightness, 2) && countUrls(l, /\/m\?s=5$/) >= 2; }, run: function () { FC.state().mseq = 0; } },   // reboot
       { when: function (l) { return countUrls(l, /\/m\?s=0$/) >= 2; }, run: function () { FC.state().mseq = 1; FC.state().motion = 1; FC.state().lv = 30; } },   // new event
       { when: function (l) { return l.tones.length >= 1; }, run: function () { FC.state().motion = 0; FC.state().lv = 0; } },
-      { when: function (l) { return countUrls(l, /\/d\?f=j/) > 5; }, key: 'prev' },
+      { when: function (l) { return countUrls(l, /\/d\?f=8/) > 5; }, key: 'prev' },
       { when: MENU(2), key: 'esc' }
     ])
   });
@@ -703,14 +716,14 @@ SCENARIOS.alerts_in_viewer_and_menu = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'sel' },
-      { when: function (l) { return l.jpgs.length >= 3; }, run: function () { FC.state().motion = 1; FC.state().lv = 20; } },
+      { when: function (l) { return l.bitmaps.length >= 3; }, run: function () { FC.state().motion = 1; FC.state().lv = 20; } },
       { when: function (l) { return l.tones.length >= 1; }, key: 'prev' },
       { when: MENU(2), key: 'esc' }
     ])
   });
   check('motion in the live viewer beeps once and blinks the LED', L.tones.length === 1 && L.tones[0][0] === 1900 && L.blinks === 1, '(' + L.tones.length + ')');
   FC.reset({ mode: 0 });
-  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, run: function (l) { FC.state().motion = 1; l.motionAt = l.urls.length; } },
+  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, run: function (l) { FC.state().motion = 1; l.motionAt = l.urls.length; } },
     { when: function (l) { return l.urls.length > l.motionAt + 8; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
   check('Live mode never alerts (it has no motion detection)', L.tones.length === 0 && L.blinks === 0 && L.urls.length > 10, '(' + L.urls.length + ' requests)');
 
@@ -743,8 +756,7 @@ SCENARIOS.alerts_in_viewer_and_menu = function () {
   L = runApp({
     preconnected: true,
     keys: script(toSettings().concat([
-      { when: null, key: 'next' },           // Alerts
-      { when: null, key: 'sel' },            // Beep+LED -> Off
+      { when: null, key: 'sel' },            // Alerts: Beep+LED -> Off
       { when: null, key: 'esc' },            // back to the main menu
       { when: function (l) { return l.urls.length >= 1; }, run: function () { FC.state().mseq = 9; } },
       { when: function (l) { return l.ticks > 900; }, key: 'esc' }
@@ -756,17 +768,16 @@ SCENARIOS.alerts_in_viewer_and_menu = function () {
   FC.reset({ mode: 2 });
   L = runApp({
     keys: script(toSettings().concat([
-      { when: null, key: 'next' },           // Alerts
-      { when: null, key: 'sel' },            // Beep + LED -> Off
+      { when: null, key: 'sel' },            // Alerts: Beep + LED -> Off
       { when: null, key: 'esc' },            // back to the main menu (cursor on Settings)
-      { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
+      { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' },
       { when: null, key: 'sel' },            // Watch live
-      { when: function (l) { return l.jpgs.length >= 3; }, run: function (l) { FC.state().motion = 1; FC.state().lv = 30; l.motionAt = l.urls.length; } },
+      { when: function (l) { return l.bitmaps.length >= 3; }, run: function (l) { FC.state().motion = 1; FC.state().lv = 30; l.motionAt = l.urls.length; } },
       { when: function (l) { return l.urls.length > l.motionAt + 8; }, key: 'prev' },   // give the camera's reply time to carry the motion flag
       { when: null, key: 'esc' }
     ]))
   });
-  check('with alerts Off the live viewer stays silent too', L.jpgs.length >= 8 && L.tones.length === 0 && L.blinks === 0, '(' + L.jpgs.length + ' strips, ' + L.tones.length + ' tones, ' + L.blinks + ' blinks, alertLevel ' + alertLevel + ')');
+  check('with alerts Off the live viewer stays silent too', L.bitmaps.length >= 8 && L.tones.length === 0 && L.blinks === 0, '(' + L.bitmaps.length + ' strips, ' + L.tones.length + ' tones, ' + L.blinks + ' blinks, alertLevel ' + alertLevel + ')');
 };
 
 SCENARIOS.settings_auto_record = function () {
@@ -800,12 +811,11 @@ SCENARIOS.settings_auto_record = function () {
 };
 
 SCENARIOS.settings_persist = function () {
-  // change three Stick settings: each one is saved as a whole file
+  // change two Stick settings: each change is saved as a whole file
   FC.reset();
   var L = runApp({
     keys: script(toSettings().concat([
-      { when: null, key: 'sel' },                                               // Picture: Photo -> Fast
-      { when: null, key: 'next' }, { when: null, key: 'sel' },                  // Alerts: Beep+LED -> Off
+      { when: null, key: 'sel' },                                               // Alerts: Beep+LED -> Off
       { when: null, key: 'next' }, { when: null, key: 'sel' },                  // Info line: On -> Off
       { when: null, key: 'esc' },
       { when: MENU(2), key: 'esc' }
@@ -818,15 +828,15 @@ SCENARIOS.settings_persist = function () {
     saved = null;
   }
   check('app ran without throwing', L.error === '', L.error);
-  check('each change is written (three writes) and the file is one valid JSON object', L.writes === 3 && saved !== null, '(' + L.files['/MiniCCTV.cfg'] + ')');
-  check('the file holds the new defaults', saved !== null && saved.photo === 0 && saved.alerts === 0 && saved.hud === 0 && saved.v === 1);
+  check('each change is written (two writes) and the file is one valid JSON object', L.writes === 2 && saved !== null, '(' + L.files['/MiniCCTV.cfg'] + ')');
+  check('the file holds the new defaults', saved !== null && saved.alerts === 0 && saved.hud === 0 && saved.v === 3);
   check('no camera was needed for any of it', L.urls.length === 0);
-  check('the rows show the new values', anyText(L, /^Fast$/) && anyText(L, /^Off$/));
+  check('the rows show the new values', anyText(L, /^Off$/));
 
-  // next start: the defaults are used (Fast picture, LED-only alerts, no info chip)
+  // next start: the defaults are used (LED-only alerts, no info chip)
   FC.reset({ mode: 1 });
   L = runApp({
-    files: { '/MiniCCTV.cfg': '{"v":1,"photo":0,"alerts":1,"hud":0}' },
+    files: { '/MiniCCTV.cfg': '{"v":3,"alerts":1,"hud":0}' },
     keys: script([
       { when: MENU(1), key: 'sel' },
       { when: function (l) { return l.bitmaps.length >= 3; }, run: function (l) { FC.state().motion = 1; FC.state().lv = 20; l.motionAt = l.urls.length; } },
@@ -834,34 +844,38 @@ SCENARIOS.settings_persist = function () {
       { when: MENU(2), key: 'esc' }
     ])
   });
-  check('a saved Fast default is used from the first picture on', L.bitmaps.length >= 3 && L.jpgs.length === 0 && countUrls(L, /\/d\?f=j/) === 0);
-  check('a saved Info line Off hides the info chip', !anyText(L, /^(FAST|PHOTO) /));
+  check('a saved Info line Off hides the info chip', L.bitmaps.length >= 3 && !anyText(L, /^LIVE /));
   check('a saved LED-only alert level blinks without beeping', L.blinks === 1 && L.tones.length === 0, '(' + L.blinks + ' blinks, ' + L.tones.length + ' tones)');
 
+  // settings files from earlier versions (they had a "photo" or "pic" key) still load, the extra key is ignored
+  FC.reset();
+  L = runApp({ files: { '/MiniCCTV.cfg': '{"v":2,"pic":1,"photo":1,"alerts":0,"hud":1}' }, keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+  check('an older settings file still loads (alerts Off kept) and the picture is still 8-bit', L.error === '' && alertLevel === 0 && L.jpgCount === 0 && countUrls(L, /\/d\?f=j/) === 0);
+
   // a damaged or out-of-range file is ignored, not trusted
-  var bad = ['{oops', '', '[]', '{"v":1,"photo":7,"alerts":9,"hud":2}', '{"photo":"yes"}'];
+  var bad = ['{oops', '', '[]', '{"v":1,"alerts":9,"hud":2}', '{"alerts":"yes"}'];
   var okAll = true;
   for (var i = 0; i < bad.length; i++) {
     FC.reset();
-    L = runApp({ files: { '/MiniCCTV.cfg': bad[i] }, keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
-    if (L.error !== '' || L.jpgs.length < 3 || L.bitmaps.length > 0 || L.writes !== 0 || photo !== true || hud !== true || alertLevel !== 2) {
+    L = runApp({ files: { '/MiniCCTV.cfg': bad[i] }, keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
+    if (L.error !== '' || L.bitmaps.length < 3 || L.writes !== 0 || hud !== true || alertLevel !== 2) {
       okAll = false;
-      out('  bad config ' + JSON.stringify(bad[i]) + ' -> error "' + L.error + '", ' + L.jpgs.length + ' strips, ' + L.bitmaps.length + ' bands');
+      out('  bad config ' + JSON.stringify(bad[i]) + ' -> error "' + L.error + '", ' + L.bitmaps.length + ' bands, hud ' + hud + ', alerts ' + alertLevel);
     }
   }
-  check('damaged or out-of-range settings files fall back to the defaults (Photo) without crashing', okAll);
+  check('damaged or out-of-range settings files fall back to the defaults without crashing', okAll);
 
   // storage that throws must not break the app, and the setting still applies for this run
   FC.reset({ autoMotion: true });
-  L = runApp({ storageBroken: true, keys: script(toFastWatch().concat([{ when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: null, key: 'esc' }])) });
-  check('with unusable storage the app still runs and the change applies for now', L.error === '' && L.bitmaps.length >= 3 && L.jpgs.length === 0, L.error);
+  L = runApp({ storageBroken: true, keys: script(toSettings().concat([{ when: null, key: 'sel' }, { when: null, key: 'esc' }, { when: MENU(2), key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'prev' }, { when: null, key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: null, key: 'esc' }])) });
+  check('with unusable storage the app still runs and the change applies for now', L.error === '' && L.bitmaps.length >= 3 && alertLevel === 0, L.error);
 };
 
 SCENARIOS.settings_without_camera = function () {
   FC.reset({ down: true });
   var L = runApp({
     keys: script(toSettings().concat([
-      { when: null, key: 'sel' },                                               // Picture works offline
+      { when: null, key: 'sel' },                                               // Alerts works offline
       { when: null, key: 'prev' }, { when: null, key: 'sel' },                  // Auto-record needs the camera
       { when: function (l) { return anyText(l, /Joined WiFi, camera silent/); }, key: 'prev' },   // back out of the error
       { when: null, key: 'esc' },
@@ -869,10 +883,107 @@ SCENARIOS.settings_without_camera = function () {
     ]))
   });
   check('app ran without throwing', L.error === '', L.error);
-  check('Stick-side settings change and save with the camera off', L.writes === 1 && anyText(L, /^Fast$/));
+  check('Stick-side settings change and save with the camera off', L.writes === 1 && anyText(L, /^Off$/));
   check('camera-side rows wait ("...") until the camera has answered', anyText(L, /^\.\.\.$/));
   check('pressing one tries to connect and explains when it cannot', anyText(L, /Joined WiFi, camera silent/) && countUrls(L, /\/ctl\?auto/) === 0);
   check('...and leaves you in Settings, then the main menu', L.menuDraws >= 2);
+};
+
+SCENARIOS.settings_person_box_and_sharpen = function () {
+  FC.reset({ box: 1, sharp: 1 });
+  var L = runApp({
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },   // Info(2) Mode(3) Timelapse(4) Person box(5)
+      { when: null, key: 'sel' },                                               // connects, then box 1 -> 0
+      { when: function (l) { return FC.state().box === 0; }, key: 'next' },     // Sharpen
+      { when: null, key: 'sel' },                                               // sharp 1 -> 0
+      { when: function (l) { return FC.state().sharp === 0; }, key: 'sel' },    // and back on
+      { when: function (l) { return FC.state().sharp === 1; }, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('app ran without throwing', L.error === '', L.error);
+  check('Person box switches the camera\'s box off', countUrls(L, /\/ctl\?box=0$/) === 1 && FC.state().box === 0);
+  check('Sharpen toggles off and on again', countUrls(L, /\/ctl\?sh=0$/) === 1 && countUrls(L, /\/ctl\?sh=1$/) === 1 && FC.state().sharp === 1);
+  check('the rows show the hints for what they do', anyText(L, /Red box: person-sized/) && anyText(L, /Crisper edges/));
+  check('both are camera settings: nothing is written to the Stick', L.writes === 0);
+};
+
+SCENARIOS.camera_screen = function () {
+  // the viewfinder: M5 / UP = shutter, DOWN = next mode (Photo, Burst, Timer, Video), UP+DOWN = exit
+  FC.reset({ autoMotion: true });
+  var L = runApp({
+    keys: script([
+      { when: MENU(1), key: 'next' },
+      { when: MENU(2), key: 'sel' },                                            // Camera
+      { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },    // shutter: Photo
+      { when: function (l) { return anyText(l, /Saved IMG_0043.jpg/); }, key: 'next' },    // -> Burst
+      { when: function (l) { return anyText(l, /Burst x6/); }, key: 'sel' },
+      { when: function (l) { return anyText(l, /Burst: 6 saved/); }, key: 'next' },         // -> Timer
+      { when: function (l) { return anyText(l, /Timer 3s/); }, key: 'sel' },
+      { when: function (l) { return countUrls(l, /snap=1/) === 8; }, key: 'next' },        // -> Video
+      { when: function (l) { return anyText(l, /Video/); }, key: 'sel' },                  // start
+      { when: function (l) { return FC.state().rec === 1; }, key: 'sel' },                 // stop
+      { when: function (l) { return FC.state().rec === 0 && anyText(l, /Video saved/); }, run: function (l) { l.mark = l.menuDraws; }, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ])
+  });
+  check('app ran without throwing', L.error === '' && !L.timeout, L.error);
+  check('the shutter takes one photo and says what it was called', anyText(L, /Saved IMG_0043.jpg/));
+  check('Burst takes six in a row', anyText(L, /Burst: 6 saved/) && countUrls(L, /snap=1/) >= 7);
+  check('Timer counts 3, 2, 1 and then takes the photo', anyText(L, /^3$/) && anyText(L, /^2$/) && anyText(L, /^1$/) && countUrls(L, /snap=1/) === 8, '(' + countUrls(L, /snap=1/) + ' snaps)');
+  check('Video starts and stops a clip', countUrls(L, /rec=t/) === 2 && FC.state().rec === 0 && anyText(L, /Recording\.\.\./));
+  check('the viewfinder draws its mode chip, shutter ring and counter', anyText(L, /< PHOTO >/) && anyText(L, /< VIDEO >/) && anyText(L, /^x\d+\s*$/));
+  check('UP+DOWN leaves the camera screen for the main menu (it does not quit the app)', L.menuDraws > L.mark && L.error === '', '(menu drawn ' + L.menuDraws + ' times, ' + L.mark + ' before leaving)');
+  check('taking pictures never flashes the screen', L.flashes === 0 && L.jpgCount === 0, '(' + L.flashes + ' flashes)');
+
+  // without a card every mode says so and none of them asks the camera (Timer does not even count down)
+  FC.reset({ sd: 0, autoMotion: true });
+  L = runApp({ keys: script([{ when: MENU(1), key: 'next' }, { when: MENU(2), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 12; }, key: 'sel' },   // Photo
+    { when: function (l) { return anyText(l, /No SD card: cannot save/); }, key: 'next' }, { when: null, key: 'sel' },                                   // Burst
+    { when: null, key: 'next' }, { when: null, key: 'sel' },                                                                                              // Timer
+    { when: null, key: 'next' }, { when: null, key: 'sel' },                                                                                              // Video
+    { when: function (l) { return anyText(l, /No SD card: cannot record/); }, key: 'esc' }, { when: MENU(2), key: 'esc' }]) });
+  check('with no SD card every shooting mode says so and never asks the camera',
+    anyText(L, /No SD card: cannot save/) && anyText(L, /No SD card: cannot record/) && countUrls(L, /snap=1|rec=t/) === 0, '(' + countUrls(L, /snap=1|rec=t/) + ' requests)');
+  check('...and the timer does not count down for nothing', !anyText(L, /^3$/));
+};
+
+SCENARIOS.no_flashing = function () {
+  // Nothing in the app may flash: no JPEG drawing (Bruce blanks the area to black first), and no bright
+  // fill of a big part of the screen. This walks the screens most likely to: the live view, a motion
+  // alert in Guard mode and in the live viewer, the shutter, a signal outage and the menus.
+  FC.reset({ mode: 2, autoMotion: true });
+  var L = runApp({
+    keys: script([
+      { when: MENU(1), key: 'sel' },                                            // Watch live
+      { when: function (l) { return l.bitmaps.length >= 12; }, run: function () { FC.state().motion = 1; FC.state().big = 1; FC.state().lv = 60; } },   // person-sized motion
+      { when: function (l) { return l.tones.length >= 3; }, key: 'next' },      // DOWN: photo
+      { when: function (l) { return anyText(l, /Saved IMG_0043/); }, key: 'sel' },   // actions menu
+      { when: null, key: 'esc' },                                               // close it again
+      { when: null, key: 'prev' },
+      { when: MENU(2), key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'sel' },   // Guard mode
+      { when: function (l) { return has(l.brightness, 2); }, run: function () { FC.state().mseq = 3; } },   // an event while guarding
+      { when: function (l) { return l.tones.length >= 6 && countUrls(l, /\/d\?f=8/) > 200; }, key: 'prev' },
+      { when: MENU(3), key: 'esc' }
+    ])
+  });
+  check('app ran without throwing', L.error === '' && !L.timeout, L.error);
+  check('the alerts and the shutter really ran', L.tones.length >= 6 && countUrls(L, /snap=1/) === 1);
+  check('no JPEG is ever drawn', L.jpgCount === 0);
+  check('no bright fill of a large area at any point', L.flashes === 0, '(' + L.flashes + ')');
+
+  // an outage and the recovery
+  FC.reset({ autoMotion: true });
+  var reqs = 0;
+  L = runApp({
+    fetch: function (url) {
+      if (/\/d\?/.test(url)) { reqs++; if (reqs > 6 && reqs <= 24) { return 'throw'; } }
+      return null;
+    },
+    keys: script([{ when: MENU(1), key: 'sel' }, { when: function () { return reqs > 30; }, key: 'prev' }, { when: MENU(2), key: 'esc' }])
+  });
+  check('a signal outage and recovery does not flash either', L.noSignal >= 1 && L.flashes === 0 && L.jpgCount === 0);
 };
 
 SCENARIOS.tables_match_firmware = function () {
@@ -902,12 +1013,13 @@ SCENARIOS.ir_trigger = function () {
   var L = runApp({
     keys: script([
       { when: MENU(1), key: 'next' },
-      { when: MENU(2), key: 'sel' },
+      { when: MENU(2), key: 'next' },
+      { when: MENU(3), key: 'sel' },
       { when: function (l) { return has(l.brightness, 2); }, run: function () { FC.state().mseq = 1; FC.state().motion = 1; } },
       { when: function (l) { return l.irs.length >= 1; }, run: function () { FC.state().motion = 0; } },
-      { when: function (l) { return countUrls(l, /\/d\?f=j/) > 100; }, run: function () { FC.state().mseq = 2; FC.state().motion = 1; } },   // a second event, seconds later
+      { when: function (l) { return countUrls(l, /\/d\?f=8/) > 100; }, run: function () { FC.state().mseq = 2; FC.state().motion = 1; } },   // a second event, seconds later
       { when: function (l) { return l.tones.length >= 2; }, run: function () { FC.state().motion = 0; } },
-      { when: function (l) { return countUrls(l, /\/d\?f=j/) > 300; }, key: 'prev' },
+      { when: function (l) { return countUrls(l, /\/d\?f=8/) > 300; }, key: 'prev' },
       { when: MENU(2), key: 'esc' }
     ])
   });
@@ -928,9 +1040,9 @@ SCENARIOS.connect_failures = function () {
     fetch: function (url) { return /\/status$/.test(url) ? { status: 200, body: { w: 320, h: 240 }, length: 0 } : null; },
     keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return anyText(l, /Camera sends 320x240/); }, key: 'prev' }, { when: MENU(2), key: 'esc' }])
   });
-  check('a config mismatch is reported instead of drawing garbage', anyText(L, /Camera sends 320x240/) && L.jpgs.length === 0);
+  check('a config mismatch is reported instead of drawing garbage', anyText(L, /Camera sends 320x240/) && L.bitmaps.length === 0);
   FC.reset();
-  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 3; }, key: 'esc' }]) });
+  L = runApp({ keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'esc' }]) });
   check('UP+DOWN quits the whole app straight from the viewer', L.error === '' && L.menuDraws === 1 && L.restores >= 1);
 };
 
@@ -972,7 +1084,7 @@ SCENARIOS.stream_trouble = function () {
     },
     keys: script([{ when: MENU(1), key: 'sel' }])
   });
-  check('a truncated reply is rejected and nothing half-drawn', L.jpgs.length === 0 && L.bitmaps.length === 0 && L.error === '');
+  check('a truncated reply is rejected and nothing half-drawn', L.bitmaps.length === 0 && L.bitmaps.length === 0 && L.error === '');
 
   // a reply that is well-formed but shorter than its Content-Length is dropped too
   FC.reset({ autoMotion: true });
@@ -987,7 +1099,7 @@ SCENARIOS.stream_trouble = function () {
     },
     keys: script([{ when: MENU(1), key: 'sel' }])
   });
-  check('a reply shorter than its declared length is rejected even if it parses', L.jpgs.length === 0 && L.error === '');
+  check('a reply shorter than its declared length is rejected even if it parses', L.bitmaps.length === 0 && L.error === '');
 
   // Fast mode: a band that is not exactly 240 x rows bytes is rejected (drawBitmap needs an exact size)
   FC.reset();
@@ -1025,7 +1137,7 @@ SCENARIOS.stream_trouble = function () {
   });
   var sv = [];
   for (var i = 0; i < L.urls.length; i++) {
-    var m = /\/d\?f=j&s=(\d+)$/.exec(L.urls[i]);
+    var m = /\/d\?f=8&s=(\d+)$/.exec(L.urls[i]);
     if (m) { sv.push(parseInt(m[1], 10)); }
   }
   var dropped = false;
@@ -1047,7 +1159,7 @@ SCENARIOS.real_firmware_bytes = function () {
       if (/\/d\?/.test(url)) { return { status: 200, body: empty(1), length: 8 }; }
       return null;
     },
-    keys: script(toFastWatch().concat([
+    keys: script(toWatch().concat([
       { when: function (l) { return countUrls(l, /\/d\?f=8&s=1$/) >= 3; }, run: function (l) { l.snap = new Uint8Array(l.fb); }, key: 'esc' }
     ]))
   });
@@ -1056,19 +1168,6 @@ SCENARIOS.real_firmware_bytes = function () {
   check('golden raw8: the screen equals the frame the C++ encoder was given', frameEquals(L.snap, fb8) === -1);
   check('golden raw8: it then asks for since=1 (the seq in the reply)', countUrls(L, /\/d\?f=8&s=1$/) >= 1);
   check('golden raw8: motion level and flags from the header are read', hdrMotion === 37 && hdrFlags === 10, '(' + hdrMotion + ',' + hdrFlags + ')');
-
-  var dj = new Uint8Array(GOLDEN.dj);
-  var side = GOLDEN.djside;
-  L = runApp({
-    fetch: function (url) {
-      if (/\/d\?/.test(url)) { return { status: 200, body: new Uint8Array(dj), length: dj.length }; }
-      return null;
-    },
-    keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 2; }, key: 'esc' }])
-  });
-  check('golden jpg: bands 2 and 8 are drawn at y=32 and y=128', L.jpgs.length >= 2 && L.jpgs[0].y === 32 && L.jpgs[1].y === 128);
-  check('golden jpg: strip sizes and first bytes match what the encoder wrote',
-    L.jpgs.length >= 2 && L.jpgs[0].len === side[0][1] && L.jpgs[1].len === side[1][1] && L.jpgs[0].b0 === side[0][2] && L.jpgs[1].b1 === side[1][3]);
 };
 
 SCENARIOS.long_run_memory = function () {
@@ -1076,36 +1175,25 @@ SCENARIOS.long_run_memory = function () {
   FC.reset({ autoMotion: true });
   var L = runApp({
     maxTicks: 200000,
-    keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgs.length >= 1500; }, key: 'prev' }, { when: MENU(2), key: 'esc' }])
-  });
-  check('1500 picture updates in Photo mode without running out of memory', L.error === '' && L.jpgs.length >= 1500 && !L.timeout, L.error);
-  FC.reset({ autoMotion: true });
-  L = runApp({
-    maxTicks: 200000,
-    keys: script(toFastWatch().concat([
+    keys: script(toWatch().concat([
       { when: function (l) { return l.bitmaps.length >= 1500; }, key: 'prev' }, { when: null, key: 'esc' }
     ]))
   });
-  check('1500 picture updates in Fast mode without running out of memory', L.error === '' && L.bitmaps.length >= 1500 && !L.timeout, L.error);
+  check('1500 picture updates without running out of memory', L.error === '' && L.bitmaps.length >= 1500 && !L.timeout, L.error);
+  check('...and none of them was a JPEG', L.jpgCount === 0);
 };
 
 SCENARIOS.footprint = function () {
-  // Used by tools/mq_footprint.js, which shrinks the engine's heap until this stops working.
-  // Fast mode first (it handles full 32 KB pictures), then Photo mode.
+  // Used by tools/mq_footprint.js, which shrinks the engine's heap until this stops working. Full
+  // 32 KB pictures, since that is the heaviest thing the app handles.
   FC.reset({ autoMotion: true });
   var L = runApp({
     light: true, maxTicks: 200000,
-    keys: script(toFastWatch().concat([
+    keys: script(toWatch().concat([
       { when: function (l) { return l.bitmapCount >= 300; }, key: 'prev' }, { when: null, key: 'esc' }
     ]))
   });
-  check('300 Fast updates ran', L.error === '' && L.bitmapCount >= 300, L.error);
-  FC.reset({ autoMotion: true });
-  L = runApp({
-    light: true, maxTicks: 200000,
-    keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.jpgCount >= 300; }, key: 'prev' }, { when: MENU(2), key: 'esc' }])
-  });
-  check('300 Photo updates ran', L.error === '' && L.jpgCount >= 300, L.error);
+  check('300 picture updates ran', L.error === '' && L.bitmapCount >= 300, L.error);
 };
 
 // ---------------------------------------------------------------------------------------------

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "box.h"
 #include "filters.h"
 #include "history.h"
 #include "jpegtools.h"
@@ -414,6 +415,113 @@ static void testModes() {
     CHECK("continuous: ...but resumes when a card comes back", r.update(312000, true, true, c) == REC_START);
 }
 
+// ------------------------------------------------------------------------------------------ box
+static void testBox() {
+    const MotionParams p = {18, 6, 30, 50, 3000};
+    auto flat = [](uint8_t v) { std::vector<uint8_t> g(MOTION_CELLS, v); return g; };
+
+    // the detector reports where the movement is
+    MotionDetector d; d.reset();
+    d.update(flat(100).data(), 0, p);
+    auto g = flat(100);
+    for (int y = 20; y <= 34; y++) for (int x = 30; x <= 39; x++) g[y * MOTION_GW + x] = 200;
+    g[5 * MOTION_GW + 70] = 220; // a lone noisy cell far away
+    MotionResult r = d.update(g.data(), 100, p);
+    CHECK("box: the bounding box covers the moving block", r.hasBox && r.bx0 == 30 && r.bx1 == 39 && r.by0 == 20 && r.by1 == 34);
+    CHECK("box: one stray noisy cell does not stretch it", r.bx1 < 70 && r.by0 > 5);
+    MotionDetector q; q.reset();
+    q.update(flat(100).data(), 0, p);
+    MotionResult none = q.update(flat(100).data(), 100, p);
+    CHECK("box: nothing moving, no box", !none.hasBox);
+    auto few = flat(100);
+    few[10 * MOTION_GW + 10] = 220; few[40 * MOTION_GW + 60] = 220;
+    CHECK("box: too few moving cells to count as motion, no box", !q.update(few.data(), 200, p).hasBox);
+
+    // mapping through the view: 1x centred (the whole width, the middle 16:9 slice)
+    int cx, cy, cw, ch;
+    View v1 = {10, 50, 50};
+    viewCropRect(v1, 640, 480, 240, 135, &cx, &cy, &cw, &ch);
+    BoxRect b = motionBoxToView(30, 20, 39, 34, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 0);
+    CHECK("box: maps into the 1x picture", b.ok && b.x0 == 90 && b.x1 == 119 && b.y0 == 37 && b.y1 == 81);
+    BoxRect bp = motionBoxToView(30, 20, 39, 34, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 2);
+    CHECK("box: padding grows it on every side", bp.x0 == 88 && bp.x1 == 121 && bp.y0 == 35 && bp.y1 == 83);
+    BoxRect above = motionBoxToView(30, 0, 39, 5, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 0);
+    CHECK("box: movement above the 16:9 slice is not shown", !above.ok);
+
+    // zoomed in 2x: the same movement is twice as big, and movement outside the view is dropped
+    View v2 = {20, 50, 50};
+    viewCropRect(v2, 640, 480, 240, 135, &cx, &cy, &cw, &ch);
+    BoxRect z = motionBoxToView(30, 20, 39, 34, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 0);
+    BoxRect zc = motionBoxToView(30, 20, 39, 34, MOTION_GW, MOTION_GH, 640, 480, 160, 120, 320, 180, 240, 135, 0);
+    CHECK("box: zoomed in, mapping uses the crop", z.ok && z.x1 - z.x0 > 2 * (119 - 90) - 3 && z.x1 - z.x0 < 2 * (119 - 90) + 3);
+    CHECK("box: crop maths agrees with a hand-worked case", zc.ok && zc.x0 == 60 && zc.y0 == (160 - 120) * 135 / 180);
+    BoxRect out = motionBoxToView(0, 0, 5, 5, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 0);
+    CHECK("box: movement outside the zoomed view is dropped", !out.ok);
+    BoxRect edge = motionBoxToView(20, 20, 45, 30, MOTION_GW, MOTION_GH, 640, 480, cx, cy, cw, ch, 240, 135, 0);
+    CHECK("box: movement half in view is clipped to the picture", edge.ok && edge.x0 >= 0 && edge.x1 <= 239 && edge.y0 >= 0 && edge.y1 <= 134);
+
+    // drawing: an outline of the right colour and width, nothing inside, nothing outside
+    auto img = solid(40, 30, 0x1234);
+    BoxRect rect = {true, 5, 4, 20, 15};
+    drawBox565(img.data(), 40, 30, rect, 0xF800, 2);
+    int outline = 0, inside = 0, outside = 0;
+    for (int y = 0; y < 30; y++) for (int x = 0; x < 40; x++) {
+        const bool red = at(img, 40, x, y) == 0xF800;
+        const bool inBox = x >= 5 && x <= 20 && y >= 4 && y <= 15;
+        const bool band = inBox && (x < 7 || x > 18 || y < 6 || y > 13);
+        if (red && band) outline++;
+        else if (red && inBox) inside++;
+        else if (red) outside++;
+        else if (band) outline = -100000; // an outline pixel that is missing
+    }
+    CHECK("box: a 2 px outline, nothing painted inside or outside", outline == (16 * 12 - 12 * 8) && inside == 0 && outside == 0);
+    auto edgeImg = solid(40, 30, 0);
+    BoxRect full = {true, 0, 0, 39, 29};
+    drawBox565(edgeImg.data(), 40, 30, full, 0xFFFF, 3);
+    CHECK("box: a box on the picture edge stays inside the buffer", at(edgeImg, 40, 0, 0) == 0xFFFF && at(edgeImg, 40, 39, 29) == 0xFFFF && at(edgeImg, 40, 20, 15) == 0);
+    BoxRect bad = {false, 0, 0, 0, 0};
+    auto untouched = solid(10, 10, 0x1111);
+    drawBox565(untouched.data(), 10, 10, bad, 0xF800, 2);
+    CHECK("box: an invalid box draws nothing", at(untouched, 10, 5, 5) == 0x1111 && at(untouched, 10, 0, 0) == 0x1111);
+}
+
+// ------------------------------------------------------------------------------------------ sharpen
+static void testSharpen() {
+    auto flat = solid(20, 12, pix_pack(120, 130, 140));
+    auto ref = flat;
+    sharpen565(flat.data(), 20, 12);
+    CHECK("sharpen: a flat picture is unchanged", flat == ref);
+
+    // a vertical edge: dark | light. The dark side gets darker and the light side lighter next to it.
+    std::vector<uint8_t> e(20 * 12 * 2);
+    for (int y = 0; y < 12; y++) for (int x = 0; x < 20; x++) pix_put(&e[((size_t)y * 20 + x) * 2], x < 10 ? pix_pack(80, 80, 80) : pix_pack(180, 180, 180));
+    auto before = e;
+    sharpen565(e.data(), 20, 12);
+    CHECK("sharpen: the dark side of an edge gets darker", pix_luma(at(e, 20, 9, 6)) < pix_luma(at(before, 20, 9, 6)));
+    CHECK("sharpen: the light side of an edge gets lighter", pix_luma(at(e, 20, 10, 6)) > pix_luma(at(before, 20, 10, 6)));
+    CHECK("sharpen: away from the edge nothing changes", at(e, 20, 4, 6) == at(before, 20, 4, 6) && at(e, 20, 15, 6) == at(before, 20, 15, 6));
+    CHECK("sharpen: the border rows and columns are left alone", at(e, 20, 9, 0) == at(before, 20, 9, 0) && at(e, 20, 0, 6) == at(before, 20, 0, 6) && at(e, 20, 19, 11) == at(before, 20, 19, 11));
+
+    // clamping: pure white next to pure black must not wrap around
+    std::vector<uint8_t> w2(20 * 12 * 2);
+    for (int y = 0; y < 12; y++) for (int x = 0; x < 20; x++) pix_put(&w2[((size_t)y * 20 + x) * 2], x < 10 ? 0x0000 : 0xFFFF);
+    sharpen565(w2.data(), 20, 12);
+    CHECK("sharpen: black and white saturate instead of wrapping", at(w2, 20, 9, 6) == 0x0000 && at(w2, 20, 10, 6) == 0xFFFF);
+
+    // it reads the ORIGINAL neighbours, not pixels it has already changed (so the result does not
+    // depend on the scan direction): a one-pixel dot gets the same boost whichever way it is scanned
+    std::vector<uint8_t> d(9 * 9 * 2);
+    for (int i = 0; i < 81; i++) pix_put(&d[(size_t)i * 2], pix_pack(100, 100, 100));
+    pix_put(&d[(4 * 9 + 4) * 2], pix_pack(160, 160, 160));
+    sharpen565(d.data(), 9, 9);
+    const int up = pix_luma(at(d, 9, 4, 3)), dn = pix_luma(at(d, 9, 4, 5)), lf = pix_luma(at(d, 9, 3, 4)), rt = pix_luma(at(d, 9, 5, 4));
+    CHECK("sharpen: the four neighbours of a dot are treated alike", up == dn && lf == rt && std::abs(up - lf) <= 1 && up < 100);
+    CHECK("sharpen: the dot itself is boosted", pix_luma(at(d, 9, 4, 4)) > 160);
+    std::vector<uint8_t> tiny(2 * 2 * 2, 0x55);
+    sharpen565(tiny.data(), 2, 2);
+    CHECK("sharpen: a picture too small to have an interior is untouched", tiny[0] == 0x55 && tiny[7] == 0x55);
+}
+
 int main() {
     testModes();
     testJpegTools();
@@ -423,6 +531,8 @@ int main() {
     testMotion();
     testHistory();
     testRecPolicy();
+    testBox();
+    testSharpen();
     printf(failed ? "\n%d FAILED\n" : "\nall passed\n", failed);
     return failed ? 1 : 0;
 }

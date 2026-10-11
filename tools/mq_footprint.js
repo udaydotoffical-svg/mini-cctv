@@ -32,7 +32,7 @@ function liveHeap(app) {
 function worksAt(app, limit) {
   const r = run(app, 'footprint', limit, []);
   const text = r.stdout + r.stderr;
-  return !/out of memory/i.test(text) && /SUMMARY passed=2 failed=0/.test(text);
+  return !/out of memory/i.test(text) && /SUMMARY passed=1 failed=0/.test(text);
 }
 function minimum(app) {
   let lo = 32 * 1024, hi = 4 * 1024 * 1024;

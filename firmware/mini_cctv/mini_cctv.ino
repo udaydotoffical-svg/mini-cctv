@@ -40,6 +40,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "img_converters.h"
+#include "box.h"
 
 #include "camera_pins.h"
 #include "config.h"
@@ -113,6 +114,8 @@ static volatile bool g_sensorDirty = true;
 static volatile bool g_forceFull = true;
 static volatile int g_mode = DEFAULT_MODE;
 static volatile uint32_t g_tlSec = TIMELAPSE_SEC;
+static volatile bool g_sharp = SHARPEN_DEFAULT; // sharpen the picture sent to the Stick
+static volatile bool g_boxOn = BOX_DEFAULT; // draw a box around moving things (Settings -> Person box)
 static volatile bool g_autoRec = REC_AUTO_DEFAULT; // lets you switch off auto-recording in Security mode
 static volatile bool g_recWantStart = false;
 static volatile bool g_recWantStop = false;
@@ -150,8 +153,12 @@ static void loadPrefs() {
     const int m = g_prefs.getUChar("mode", DEFAULT_MODE);
     const uint32_t tl = g_prefs.getUShort("tl", TIMELAPSE_SEC);
     const bool ar = g_prefs.getUChar("ar", REC_AUTO_DEFAULT ? 1 : 0) != 0;
+    const bool bx = g_prefs.getUChar("bx", BOX_DEFAULT ? 1 : 0) != 0;
+    const bool sp = g_prefs.getUChar("sp", SHARPEN_DEFAULT ? 1 : 0) != 0;
     g_prefs.end();
+    g_sharp = sp;
     g_autoRec = ar;
+    g_boxOn = bx;
     g_mode = (m >= 0 && m < MODE_COUNT) ? m : DEFAULT_MODE;
     g_tlSec = tl < 5 ? 5 : (tl > 3600 ? 3600 : tl);
 }
@@ -160,6 +167,8 @@ static void savePrefs() {
     g_prefs.putUChar("mode", (uint8_t)g_mode);
     g_prefs.putUShort("tl", (uint16_t)g_tlSec);
     g_prefs.putUChar("ar", g_autoRec ? 1 : 0);
+    g_prefs.putUChar("bx", g_boxOn ? 1 : 0);
+    g_prefs.putUChar("sp", g_sharp ? 1 : 0);
     g_prefs.end();
 }
 
@@ -456,6 +465,8 @@ static void captureTask(void *) {
     int lastMode = -1;
     uint32_t loopStartUs = micros();
     bool prevActive = false;
+    MotionResult boxCell = {0, 0, false, false, false, false, 0, 0, 0, 0}; // the last frame that had a box
+    uint32_t boxAt = 0;
     const MotionParams mp = {MOTION_LUMA_THRESH, MOTION_MIN_CELLS, MOTION_BIG_TENTHS, MOTION_GLOBAL_PCT, MOTION_HOLD_MS};
 
     for (;;) {
@@ -499,6 +510,7 @@ static void captureTask(void *) {
         g_motionLevel = mr.level;
         g_motionBig = mr.big;
         g_motionActive = mr.active;
+        if (mr.hasBox) { boxCell = mr; boxAt = now; }
         const bool rising = mr.active && !prevActive;
         if (rising) g_motionSeq++;
         prevActive = mr.active;
@@ -564,6 +576,7 @@ static void captureTask(void *) {
 
         // --- the live picture the Stick sees: pan/zoom, then (below) filter
         int cx, cy, cw, ch;
+        const int sensW = fb->width, sensH = fb->height;
         viewCropRect(g_view, fb->width, fb->height, OUT_W, OUT_H, &cx, &cy, &cw, &ch);
         scaleBoxRect565(fb->buf, fb->width, fb->height, cx, cy, cw, ch, g_newRgb, OUT_W, OUT_H);
         esp_camera_fb_return(fb);
@@ -577,9 +590,15 @@ static void captureTask(void *) {
         }
 
         filterApply(g_filter, g_newRgb, OUT_W, OUT_H, g_rawNew, &g_filtState);
+        if (g_sharp && g_filter != FILTER_EDGE && g_filter != FILTER_THERMAL) sharpen565(g_newRgb, OUT_W, OUT_H);
 
         // --- live, or rewind / photo / clip
         const bool ov = updateOverride(now);
+        if (!ov && g_boxOn && caps.motion && boxAt && now - boxAt < BOX_HOLD_MS) {
+            const BoxRect bx = motionBoxToView(boxCell.bx0, boxCell.by0, boxCell.bx1, boxCell.by1, MOTION_GW, MOTION_GH, sensW, sensH,
+                                               cx, cy, cw, ch, OUT_W, OUT_H, BOX_PAD);
+            drawBox565(g_newRgb, OUT_W, OUT_H, bx, boxCell.big ? 0xF800 : 0x07FF, BOX_THICK); // red = person-sized, cyan = other motion
+        }
         const uint8_t *shown = ov ? g_ovRgb : g_newRgb;
 
         // Which bands differ from what viewers already have?
@@ -764,6 +783,22 @@ static esp_err_t ctlHandler(httpd_req_t *req) {
     if (has("fl")) { g_vflip = atoi(v) != 0; g_sensorDirty = true; }
     if (has("mi")) { g_mirror = atoi(v) != 0; g_sensorDirty = true; }
     if (has("br")) { g_bright = viewClamp(atoi(v), -2, 2); g_sensorDirty = true; }
+    if (has("sh")) {
+        const bool b = atoi(v) != 0;
+        if (b != g_sharp) {
+            g_sharp = b;
+            g_forceFull = true;
+            savePrefs();
+        }
+    }
+    if (has("box")) {
+        const bool b = atoi(v) != 0;
+        if (b != g_boxOn) {
+            g_boxOn = b;
+            g_forceFull = true; // repaint so a box that was showing goes away
+            savePrefs();
+        }
+    }
     if (has("auto")) {
         const bool a = atoi(v) != 0;
         if (a != g_autoRec) {
@@ -842,13 +877,13 @@ static esp_err_t ctlHandler(httpd_req_t *req) {
     if (has("pp")) g_ovPlay = atoi(v) != 0;
     if (has("sk")) g_ovSeekMs += atoi(v) * 1000;
 
-    char json[480];
+    char json[560];
     const int n = snprintf(json, sizeof json,
                            "{\"z\":%d,\"px\":%d,\"py\":%d,\"f\":%d,\"n\":%d,\"fl\":%d,\"mi\":%d,\"br\":%d,\"rec\":%d,"
-                           "\"auto\":%d,\"sd\":%d,\"free\":%lu,\"ov\":%d,\"ago\":%lu,\"hist\":%lu,\"play\":%d,\"mode\":%d,\"tl\":%lu,"
+                           "\"auto\":%d,\"box\":%d,\"sharp\":%d,\"sd\":%d,\"free\":%lu,\"ov\":%d,\"ago\":%lu,\"hist\":%lu,\"play\":%d,\"mode\":%d,\"tl\":%lu,"
                            "\"cpos\":%lu,\"clen\":%lu,\"name\":\"%s\",\"msg\":\"%s\"}",
                            g_view.zoom10, g_view.px, g_view.py, (int)g_filter, g_night ? 1 : 0, g_vflip ? 1 : 0,
-                           g_mirror ? 1 : 0, (int)g_bright, g_recording ? 1 : 0, g_autoRec ? 1 : 0, g_sdOk ? 1 : 0,
+                           g_mirror ? 1 : 0, (int)g_bright, g_recording ? 1 : 0, g_autoRec ? 1 : 0, g_boxOn ? 1 : 0, g_sharp ? 1 : 0, g_sdOk ? 1 : 0,
                            (unsigned long)g_sdFreeMB, (int)g_ovMode, (unsigned long)(g_ovMode == OV_REWIND ? (millis() - g_ovPosT) / 1000 : 0),
                            (unsigned long)(g_histSpanMs / 1000), g_ovPlay ? 1 : 0, (int)g_mode, (unsigned long)g_tlSec,
                            (unsigned long)(g_clipPosMs / 1000),

@@ -136,3 +136,38 @@ static inline void filterApply(int f, uint8_t *rgb, int w, int h, uint8_t *scrat
         pix_put(rgb + i * 2, pix_pack(r, g, b));
     }
 }
+
+// A mild unsharp mask for the picture sent to the Stick. The 640x480 sensor picture is averaged down
+// to 240x135, which is clean but a little soft; this puts back some edge contrast before the picture
+// is squeezed into 256 colours. Each channel gets c + (4c - up - down - left - right) / 8 (half of
+// the difference from the neighbour average), clamped. Border pixels are left alone.
+static inline void sharpen565(uint8_t *rgb, int w, int h) {
+    if (w < 3 || h < 3 || w > 320) return;
+    uint8_t prev[320 * 3], cur[320 * 3];
+    auto load = [&](const uint8_t *p, uint8_t *dst) {
+        for (int x = 0; x < w; x++) {
+            const uint16_t v = pix_get(p + x * 2);
+            const uint32_t r = (v >> 11) & 0x1F, g = (v >> 5) & 0x3F, b = v & 0x1F;
+            dst[x * 3] = (uint8_t)((r << 3) | (r >> 2));
+            dst[x * 3 + 1] = (uint8_t)((g << 2) | (g >> 4));
+            dst[x * 3 + 2] = (uint8_t)((b << 3) | (b >> 2));
+        }
+    };
+    load(rgb, prev);
+    for (int y = 1; y < h - 1; y++) {
+        load(rgb + (size_t)y * w * 2, cur);
+        uint8_t next[320 * 3];
+        load(rgb + (size_t)(y + 1) * w * 2, next);
+        for (int x = 1; x < w - 1; x++) {
+            int o[3];
+            for (int c = 0; c < 3; c++) {
+                const int v = cur[x * 3 + c];
+                const int sum = prev[x * 3 + c] + next[x * 3 + c] + cur[(x - 1) * 3 + c] + cur[(x + 1) * 3 + c];
+                int n = v + ((4 * v - sum) >> 3);
+                o[c] = n < 0 ? 0 : (n > 255 ? 255 : n);
+            }
+            pix_put(rgb + ((size_t)y * w + x) * 2, pix_pack((uint32_t)o[0], (uint32_t)o[1], (uint32_t)o[2]));
+        }
+        for (int i = 0; i < w * 3; i++) prev[i] = cur[i];
+    }
+}

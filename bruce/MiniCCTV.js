@@ -14,9 +14,13 @@
 //   Timelapse   a photo every N seconds
 // Without an SD card everything still works except saving photos and clips; the app says so.
 //
-// Settings (main menu -> Settings): auto-record, the default picture mode (Fast / Photo), alerts and
-// the info line are remembered. Auto-record, camera mode and the timelapse interval are stored on the
-// camera; the rest in /MiniCCTV.cfg on the Stick.
+// Settings (main menu -> Settings): auto-record, alerts, the info line, camera mode, timelapse interval,
+// the person box and sharpening. Alerts and the info line are kept in /MiniCCTV.cfg on the Stick; the
+// rest is stored on the camera.
+//
+// Nothing on screen flashes or blinks. The picture is always sent as 8-bit bands that are drawn in
+// place (Bruce's JPEG drawing blanks its area to black first, which shows as blinking, so it is not
+// used), and the app never fills the screen with a bright colour.
 //
 // Look: the Knowura design language - dark ground, black ink outlines, hard offset shadows, cyan for
 // active things, a deep-blue to blue gradient for the selected control, uppercase labels, pixel type.
@@ -66,6 +70,7 @@ var ALERT_SHORT = ['Off', 'LED', 'Beep+LED'];
 var FLIP_NAMES = ['None', 'Mirror', 'Flip', 'Both'];
 var TL_STEPS = [10, 30, 60, 300, 900, 3600];
 
+
 // flags in the camera's reply header (delta.h)
 var DF_REC = 1;
 var DF_SD = 2;
@@ -102,10 +107,9 @@ var C = {
   bad: display.color(255, 77, 109)
 };
 
-var cam = { mode: 2, sd: 1, rec: 0, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1, free: 0, hist: 0, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '' };
+var cam = { mode: 2, sd: 1, rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1, free: 0, hist: 0, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '' };
 var camSeen = false; // true once the camera has answered, so `cam` holds real values
-var cfg = { photo: true, alerts: 2, hud: true }; // the Stick's saved defaults
-var photo = true; // true = Photo (JPEG strips, 16-bit colour), false = Fast (8-bit, never blinks)
+var cfg = { alerts: 2, hud: true }; // the Stick's saved defaults
 var hud = true;
 var alertLevel = 2;
 var since = 0; // last picture update we have fully drawn
@@ -115,6 +119,7 @@ var hdrFlags = DF_SD;
 var toastText = '';
 var toastKind = '';
 var toastUntil = 0;
+var toastLift = 0; // pixels to raise toasts (the camera screen keeps its shutter ring clear)
 var lastIrAt = 0;
 var menuMseq = -1;
 var badSize = '';
@@ -168,9 +173,6 @@ function loadCfg() {
   if (!o) {
     return;
   }
-  if (o.photo === 0 || o.photo === 1) {
-    cfg.photo = o.photo === 1;
-  }
   if (o.alerts === 0 || o.alerts === 1 || o.alerts === 2) {
     cfg.alerts = o.alerts;
   }
@@ -181,7 +183,7 @@ function loadCfg() {
 
 function saveCfg() {
   try {
-    storage.write(CFG_FILE, JSON.stringify({ v: 1, photo: cfg.photo ? 1 : 0, alerts: cfg.alerts, hud: cfg.hud ? 1 : 0 }), 'write');
+    storage.write(CFG_FILE, JSON.stringify({ v: 3, alerts: cfg.alerts, hud: cfg.hud ? 1 : 0 }), 'write');
   } catch (e) {
     lastErr = 'save ' + e;
   }
@@ -304,6 +306,7 @@ var ICON_ART = {
   camera: ['............', '....XXXX....', 'XXXXXXXXXXXX', 'X..........X', 'X...XXXX...X', 'X..X....X..X', 'X..X....X..X', 'X...XXXX...X', 'X..........X', 'XXXXXXXXXXXX', '............', '............'],
   sliders: ['..XXX.......', 'XXXXXXXXXXXX', '..XXX.......', '............', '.......XXX..', 'XXXXXXXXXXXX', '.......XXX..', '............', '....XXX.....', 'XXXXXXXXXXXX', '....XXX.....', '............'],
   power: ['.....XX.....', '.....XX.....', '..XX.XX.XX..', '.XX..XX..XX.', '.X...XX...X.', 'X....XX....X', 'X..........X', 'X..........X', '.X........X.', '.XX......XX.', '..XX....XX..', '....XXXX....'],
+  gear: ['.....XX.....', '..X..XX..X..', '...XXXXXX...', '..XX....XX..', '.XX......XX.', 'XXX......XXX', 'XXX......XXX', '.XX......XX.', '..XX....XX..', '...XXXXXX...', '..X..XX..X..', '.....XX.....'],
   play: ['............', '.XX.........', '.XXXX.......', '.XXXXXX.....', '.XXXXXXXX...', '.XXXXXXXXXX.', '.XXXXXXXXXX.', '.XXXXXXXX...', '.XXXXXX.....', '.XXXX.......', '.XX.........', '............'],
   back: ['............', '............', '............', '...X........', '..XX........', '.XXXXXXXXXX.', '.XXXXXXXXXX.', '..XX........', '...X........', '............', '............', '............']
 };
@@ -413,7 +416,7 @@ function drawToast() {
   var t = clip(toastText, 33);
   var w = textW(t, 1) + 28;
   var x = Math.floor((W - w) / 2);
-  var y = H - 24;
+  var y = H - 24 - toastLift;
   var col = toastKind === 'ok' ? C.ok : toastKind === 'err' ? C.bad : C.cyan;
   box(x, y, w, 16, 7, C.panel, 2, 2);
   display.drawFillCircle(x + 10, y + 8, 3, col);
@@ -422,6 +425,7 @@ function drawToast() {
 
 // A toast over a menu (the menu repaints itself afterwards).
 function notice(msg, kind) {
+  toastLift = 0;
   toastText = msg;
   toastKind = kind || '';
   drawToast();
@@ -712,7 +716,7 @@ function alertMotion(big) {
 function fetchBands() {
   var res;
   try {
-    res = wifi.httpFetch(CAM_HOST + '/d?f=' + (photo ? 'j' : '8') + '&s=' + since, { responseType: 'binary' });
+    res = wifi.httpFetch(CAM_HOST + '/d?f=8&s=' + since, { responseType: 'binary' });
   } catch (e) {
     lastErr = 'net ' + e;
     return null;
@@ -754,7 +758,7 @@ function applyBands(b) {
     var len = b[off] | (b[off + 1] << 8);
     off += 2;
     var rows = i === NBANDS - 1 ? LAST_ROWS : BAND_H;
-    if (off + len > b.length || (!photo && len !== FRAME_W * rows)) {
+    if (off + len > b.length || len !== FRAME_W * rows) {
       return -1;
     }
     off += len;
@@ -770,17 +774,9 @@ function applyBands(b) {
     var n = b[off] | (b[off + 1] << 8);
     off += 2;
     var y = OY + i * BAND_H;
-    if (photo) {
-      if (n > 0) {
-        var jp = new Uint8Array(n);
-        jp.set(b.subarray(off, off + n), 0);
-        display.drawJpg(jp, OX, y, false);
-      }
-    } else {
-      var buf = i === NBANDS - 1 ? lastBuf : bandBuf;
-      buf.set(b.subarray(off, off + n), 0);
-      display.drawBitmap(OX, y, buf, FRAME_W, i === NBANDS - 1 ? LAST_ROWS : BAND_H, 8);
-    }
+    var buf = i === NBANDS - 1 ? lastBuf : bandBuf;
+    buf.set(b.subarray(off, off + n), 0);
+    display.drawBitmap(OX, y, buf, FRAME_W, i === NBANDS - 1 ? LAST_ROWS : BAND_H, 8);
     off += n;
     drawn++;
   }
@@ -807,7 +803,7 @@ function drawHud(kind, fps, netMs, drawMs) {
   } else if (kind === 'ptz') {
     s = 'ZOOM ' + (cam.z / 10) + 'x  pan ' + cam.px + ',' + cam.py;
   } else {
-    s = (photo ? 'PHOTO ' : 'FAST ') + (fps > 0 ? fps + ' fps' : 'still') + ' ' + netMs + '/' + drawMs + 'ms';
+    s = 'LIVE ' + (fps > 0 ? fps + ' fps' : 'still') + ' ' + netMs + '/' + drawMs + 'ms';
   }
   chip(2, 2, pad(clip(s, 22), 22), color, C.code);
 }
@@ -844,23 +840,124 @@ function drawHint(kind) {
     pairs = [['UP', 'older'], ['DN', 'newer'], ['M5', 'menu']];
   } else if (kind === 'play') {
     pairs = [['UP', 'back'], ['DN', '+10s'], ['M5', 'menu']];
+  } else if (kind === 'shoot') {
+    pairs = [['UP', 'shoot'], ['DN', 'mode'], ['UP+DN', 'exit']];
   }
   display.drawFillRect(0, H - 14, W, 14, C.code);
   keys(pairs, H - 13);
 }
 
+// Asks the camera for a photo. Returns its reply, or null if it did not answer.
+function snapOnce() {
+  return ctl('snap=1');
+}
+
+function takePhoto() {
+  if (!(hdrFlags & DF_SD)) {
+    toast('No SD card: cannot save', 'err');
+    return false;
+  }
+  toast('Saving photo...', '');
+  drawToast();
+  var r = snapOnce();
+  if (r && r.msg === 'saved') {
+    toast('Saved ' + r.name, 'ok');
+    return true;
+  }
+  toast(r ? r.msg : 'camera not answering', 'err');
+  return false;
+}
+
 function quickPhoto() {
+  takePhoto();
+}
+
+// ---- the camera screen: a viewfinder with a shutter
+var SHOOT_MODES = ['Photo', 'Burst', 'Timer', 'Video'];
+var BURST_N = 6;
+var TIMER_S = 3;
+
+function bigNumber(text) {
+  box(W / 2 - 34, 36, 68, 52, 12, C.panel, 3, 2);
+  txtC(text, W / 2, 46, 4, C.cyan);
+}
+
+// UP / M5 = shutter. Photo: one picture. Burst: six in a row. Timer: three seconds, then one.
+// Video: starts a clip, press again to stop.
+function shutter(st) {
+  var m = st.sm;
+  var i;
+  var r;
+  if (m === 3) {
+    if (!(hdrFlags & DF_SD)) {
+      toast('No SD card: cannot record', 'err');
+      return;
+    }
+    var was = hdrFlags & DF_REC;
+    r = ctl('rec=t');
+    if (!was && r && r.rec === 1) {
+      st.recAt = now();
+    }
+    toast(was ? 'Video saved' : 'Recording...', was ? 'ok' : '');
+    return;
+  }
   if (!(hdrFlags & DF_SD)) {
     toast('No SD card: cannot save', 'err');
     return;
   }
-  toast('Saving photo...', '');
-  drawToast();
-  var r = ctl('snap=1');
-  if (r && r.msg === 'saved') {
-    toast('Saved ' + r.name, 'ok');
+  if (m === 2) {
+    for (i = TIMER_S; i > 0; i--) {
+      bigNumber('' + i);
+      delay(1000);
+    }
+  }
+  if (m === 1) {
+    var ok = 0;
+    for (i = 0; i < BURST_N; i++) {
+      r = snapOnce();
+      if (!r || r.msg !== 'saved') {
+        break;
+      }
+      ok++;
+    }
+    st.shots += ok;
+    toast('Burst: ' + ok + ' saved', ok === BURST_N ? 'ok' : 'err');
+    return;
+  }
+  if (takePhoto()) {
+    st.shots++;
+  }
+}
+
+// viewfinder corners, mode chip, shutter ring and a counter, drawn over the live picture
+function drawShootUI(st) {
+  var c = C.text;
+  var rec = hdrFlags & DF_REC;
+  var label = SHOOT_MODES[st.sm];
+  var l = pad('< ' + up(label) + ' >', 12);
+  // corner brackets, 2 px
+  var x0 = 14;
+  var y0 = 20;
+  var x1 = W - 16;
+  var y1 = H - 36;
+  display.drawFillRect(x0, y0, 14, 2, c);
+  display.drawFillRect(x0, y0, 2, 14, c);
+  display.drawFillRect(x1 - 12, y0, 14, 2, c);
+  display.drawFillRect(x1, y0, 2, 14, c);
+  display.drawFillRect(x0, y1, 14, 2, c);
+  display.drawFillRect(x0, y1 - 12, 2, 14, c);
+  display.drawFillRect(x1 - 12, y1, 14, 2, c);
+  display.drawFillRect(x1, y1 - 12, 2, 14, c);
+  chip(2, 2, l, C.cyan, C.code);
+  // shutter ring: red inside while a video records
+  display.drawFillCircle(W / 2, H - 15, 12, C.ink);
+  display.drawFillCircle(W / 2, H - 15, 11, C.text);
+  display.drawFillCircle(W / 2, H - 15, 9, C.ink);
+  display.drawFillCircle(W / 2, H - 15, 7, rec ? C.bad : st.sm === 3 ? C.dim : C.text);
+  if (rec && st.recAt > 0) {
+    chip(W - 50, H - 21, pad(mmss((now() - st.recAt) / 1000), 6), C.bad, C.code);
   } else {
-    toast(r ? r.msg : 'camera not answering', 'err');
+    chip(W - 50, H - 21, pad('x' + st.shots, 6), C.text, C.code);
   }
 }
 
@@ -890,7 +987,6 @@ function actionItems() {
     item('Filter', FILTERS[cam.f]),
     item('Night', cam.n ? 'On' : 'Off'),
     item('Mode', MODES[cam.mode]),
-    item('Picture', photo ? 'Photo' : 'Fast'),
     item('Info', hud ? 'On' : 'Off'),
     item('Main menu')
   ];
@@ -924,8 +1020,6 @@ function actionSelect(i) {
       return 'quit';
     }
   } else if (i === 8) {
-    photo = !photo;
-  } else if (i === 9) {
     hud = !hud;
   } else {
     return 'menu';
@@ -1095,6 +1189,16 @@ function viewerKey(kind, k, st) {
     }
     return 'resume';
   }
+  if (kind === 'shoot') {
+    if (k === 'next') {
+      st.sm = (st.sm + 1) % SHOOT_MODES.length;
+      since = 0;
+      toast(SHOOT_MODES[st.sm] + (st.sm === 1 ? ' x' + BURST_N : st.sm === 2 ? ' ' + TIMER_S + 's' : ''), '');
+      return '';
+    }
+    shutter(st);
+    return '';
+  }
   // live and guard
   if (k === 'prev') {
     return 'menu';
@@ -1110,10 +1214,11 @@ function viewerKey(kind, k, st) {
 // Returns 'menu', 'back', 'auto' or 'quit'.
 function viewer(kind) {
   display.fill(0);
+  toastLift = kind === 'shoot' ? 22 : 0;
   since = 0;
   recShown = 0;
   noSdShown = 0;
-  var st = { ptz: 0 };
+  var st = { ptz: 0, sm: 0, shots: 0, recAt: 0 };
   var fails = 0;
   var outages = 0;
   var fps = 0;
@@ -1138,7 +1243,7 @@ function viewer(kind) {
   while (true) {
     var k = readKey();
     if (k === 'esc') {
-      return 'quit';
+      return kind === 'shoot' ? 'menu' : 'quit';
     }
     if (k !== '') {
       var act = viewerKey(kind, k, st);
@@ -1164,8 +1269,7 @@ function viewer(kind) {
         return act;
       }
       if (act === 'resume') {
-        display.fill(0);
-        since = 0;
+        since = 0; // the picture repaints over the menu in place: no black frame in between
         hintUntil = 0;
         recShown = 0;
         noSdShown = 0;
@@ -1206,7 +1310,6 @@ function viewer(kind) {
       joinCam();
       fails = 0;
       since = 0;
-      display.fill(0);
       recShown = 0;
       noSdShown = 0;
     } else if (!reply) {
@@ -1239,7 +1342,9 @@ function viewer(kind) {
       lastState = t;
       ctl('');
     }
-    if (hud || kind !== 'live') {
+    if (kind === 'shoot') {
+      drawShootUI(st);
+    } else if (hud || kind !== 'live') {
       drawHud(kind, fps, netMs, drawMs);
     }
     drawStatus();
@@ -1357,8 +1462,6 @@ function guardLoop(ms) {
       ms = m.ms;
       gd.events++;
       display.restoreBrightness();
-      display.fill(C.bad);
-      txtC('MOTION', W / 2, 50, 4, C.ink);
       alertMotion(m.big === 1);
       var r2 = viewer('guard');
       display.setBrightness(GUARD_DIM);
@@ -1485,7 +1588,7 @@ function cameraMenu() {
     return c === 'quit' ? 'quit' : '';
   }
   return runMenu(
-    'Camera',
+    'Image',
     function () {
       return [
         item('Filter', FILTERS[cam.f]),
@@ -1529,11 +1632,12 @@ function cameraMenu() {
 function settingsItems() {
   return [
     item('Auto-record', camSeen ? (cam.auto ? 'On' : 'Off') : '...'),
-    item('Picture', cfg.photo ? 'Photo' : 'Fast'),
     item('Alerts', ALERT_SHORT[cfg.alerts]),
     item('Info line', cfg.hud ? 'On' : 'Off'),
     item('Mode', camSeen ? MODES[cam.mode] : '...'),
     item('Timelapse', camSeen ? tlName(cam.tl) : '...'),
+    item('Person box', camSeen ? (cam.box ? 'On' : 'Off') : '...'),
+    item('Sharpen', camSeen ? (cam.sharp ? 'On' : 'Off') : '...'),
     item('Back', '', 'back')
   ];
 }
@@ -1543,19 +1647,22 @@ function settingsHint(sel) {
     return camSeen && cam.mode !== 2 ? 'Used in Security mode.' : 'A clip for every motion event.';
   }
   if (sel === 1) {
-    return 'Photo: full colour. Fast: no blinking.';
-  }
-  if (sel === 2) {
     return 'Buzzer and the red LED on motion.';
   }
-  if (sel === 3) {
+  if (sel === 2) {
     return 'FPS and timings on the live picture.';
   }
-  if (sel === 4) {
+  if (sel === 3) {
     return camSeen ? MODE_BLURB[cam.mode] : 'The camera keeps its mode.';
   }
-  if (sel === 5) {
+  if (sel === 4) {
     return 'Photo interval in Timelapse mode.';
+  }
+  if (sel === 5) {
+    return 'Red box: person-sized. Cyan: other.';
+  }
+  if (sel === 6) {
+    return 'Crisper edges in the live picture.';
   }
   return NAV;
 }
@@ -1572,24 +1679,18 @@ function settingsSelect(i) {
   var c;
   var r;
   if (i === 1) {
-    cfg.photo = !cfg.photo;
-    photo = cfg.photo;
-    saveCfg();
-    return '';
-  }
-  if (i === 2) {
     cfg.alerts = (cfg.alerts + 1) % 3;
     alertLevel = cfg.alerts;
     saveCfg();
     return '';
   }
-  if (i === 3) {
+  if (i === 2) {
     cfg.hud = !cfg.hud;
     hud = cfg.hud;
     saveCfg();
     return '';
   }
-  if (i === 6) {
+  if (i === 7) {
     return 'back';
   }
   c = needCamera();
@@ -1601,14 +1702,18 @@ function settingsSelect(i) {
   }
   if (i === 0) {
     r = ctl('auto=' + (cam.auto ? 0 : 1));
-  } else if (i === 4) {
+  } else if (i === 3) {
     if (pickMode() === 'quit') {
       return 'quit';
     }
     r = cam;
-  } else {
+  } else if (i === 4) {
     pickTimelapse();
     r = cam;
+  } else if (i === 5) {
+    r = ctl('box=' + (cam.box ? 0 : 1));
+  } else {
+    r = ctl('sh=' + (cam.sharp ? 0 : 1));
   }
   if (!r) {
     notice('Camera not answering', 'err');
@@ -1660,56 +1765,63 @@ function menuIdle() {
 function mainLabels() {
   return [
     item('Watch live', '', 'eye'),
+    item('Camera', '', 'camera'),
     item('Guard mode', '', 'shield'),
     item('Photos & clips', '', 'image'),
-    item('Camera', '', 'camera'),
-    item('Settings', '', 'sliders'),
+    item('Image', '', 'sliders'),
+    item('Settings', '', 'gear'),
     item('Exit', '', 'power')
   ];
 }
 
 function mainHint(sel) {
   if (sel === 1) {
-    return 'Screen off, alerts when it moves';
+    return 'Viewfinder: photo, burst, timer, video';
   }
   if (sel === 2) {
-    return 'Browse what is on the SD card';
+    return 'Screen off, alerts when it moves';
   }
   if (sel === 3) {
-    return 'Filter, night, flip, zoom';
+    return 'Browse what is on the SD card';
   }
   if (sel === 4) {
+    return 'Filter, night, flip, zoom';
+  }
+  if (sel === 5) {
     return 'Auto-record, picture, alerts, mode';
   }
   return NAV;
 }
 
+// opens a viewer screen; returns 'quit' only when the whole app should end
+function openViewer(kind) {
+  var c = ensureConnected();
+  if (c === 'quit') {
+    return 'quit';
+  }
+  if (c === 'ok' && viewer(kind) === 'quit') {
+    return 'quit';
+  }
+  return '';
+}
+
 function mainSelect(i) {
-  var c;
-  var r;
   if (i === 0) {
-    c = ensureConnected();
-    if (c === 'quit') {
-      return 'quit';
-    }
-    if (c === 'ok') {
-      r = viewer('live');
-      if (r === 'quit') {
-        return 'quit';
-      }
-    }
-    return '';
+    return openViewer('live');
   }
   if (i === 1) {
-    return guard() === 'quit' ? 'quit' : '';
+    return openViewer('shoot');
   }
   if (i === 2) {
-    return gallery() === 'quit' ? 'quit' : '';
+    return guard() === 'quit' ? 'quit' : '';
   }
   if (i === 3) {
-    return cameraMenu() === 'quit' ? 'quit' : '';
+    return gallery() === 'quit' ? 'quit' : '';
   }
   if (i === 4) {
+    return cameraMenu() === 'quit' ? 'quit' : '';
+  }
+  if (i === 5) {
     return settings() === 'quit' ? 'quit' : '';
   }
   return 'quit';
@@ -1717,7 +1829,6 @@ function mainSelect(i) {
 
 function main() {
   loadCfg();
-  photo = cfg.photo;
   alertLevel = cfg.alerts;
   hud = cfg.hud;
   runMenu(APP_NAME, mainLabels, mainHint, mainSelect, 'quit', menuIdle);

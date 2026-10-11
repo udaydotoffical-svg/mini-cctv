@@ -20,7 +20,7 @@ var FC = (function () {
   function reset(opts) {
     st = {
       seq: 1, reqs: 0, mseq: 0, lv: 0, big: 0, motion: 0,
-      mode: 2, sd: 1, rec: 0, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1,
+      mode: 2, sd: 1, rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1,
       free: 12000, hist: 90, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '', photoNo: 42,
       autoMotion: false, down: false, hook: null,
       photos: [['IMG_0041.jpg', 61440], ['IMG_0040.jpg', 59392]],
@@ -162,7 +162,7 @@ var FC = (function () {
 
   function stateJson(msg, name) {
     return {
-      z: st.z, px: st.px, py: st.py, f: st.f, n: st.n, fl: st.fl, mi: st.mi, br: st.br, rec: st.rec, auto: st.auto,
+      z: st.z, px: st.px, py: st.py, f: st.f, n: st.n, fl: st.fl, mi: st.mi, br: st.br, rec: st.rec, auto: st.auto, box: st.box, sharp: st.sharp,
       sd: st.sd, free: st.free, ov: st.ov, ago: st.ago, hist: st.hist, play: st.play, mode: st.mode, tl: st.tl,
       cpos: st.cpos, clen: st.clen, name: name || st.name, msg: msg
     };
@@ -180,6 +180,8 @@ var FC = (function () {
     if (q.hasOwnProperty('mi')) { st.mi = parseInt(q.mi, 10) ? 1 : 0; }
     if (q.hasOwnProperty('br')) { st.br = clamp(parseInt(q.br, 10), -2, 2); }
     if (q.hasOwnProperty('auto')) { st.auto = parseInt(q.auto, 10) ? 1 : 0; }
+    if (q.hasOwnProperty('sh')) { st.sharp = parseInt(q.sh, 10) ? 1 : 0; bumpAll(); }
+    if (q.hasOwnProperty('box')) { st.box = parseInt(q.box, 10) ? 1 : 0; bumpAll(); }
     if (q.hasOwnProperty('mode')) {
       var m = parseInt(q.mode, 10);
       if (m >= 0 && m < 5 && m !== st.mode) {

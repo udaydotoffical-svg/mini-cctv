@@ -103,3 +103,11 @@
 #define TIMELAPSE_SEC     60     // photo interval in MODE_TIMELAPSE (changeable from the Stick)
 #define REC_CONT_CLIP_MS  300000 // clips are cut at this length in MODE_CONTINUOUS
 #define EVENT_PHOTO_GAP_MS 8000  // at most one "motion started" photo this often
+
+// ---- the box drawn around whatever is moving (the Stick's "Person box" setting)
+#define BOX_DEFAULT  1     // on at first boot
+#define BOX_THICK    2     // outline width in pixels
+#define BOX_PAD      1     // grow the box by this many pixels
+#define BOX_HOLD_MS  400   // keep showing a box this long after the last frame that had one
+
+#define SHARPEN_DEFAULT 1  // mild sharpening of the picture sent to the Stick (Settings -> Sharpen)

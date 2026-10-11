@@ -132,30 +132,32 @@ function run(name, opts, steps) {
 const seen = (re) => (L) => L.texts.some((t) => re.test(t));
 const frames = (n) => { let base = null; return (L) => { if (base === null) base = L.ticks; return L.ticks - base > n; }; };
 
-// ---- the tour: menus, viewer, settings, guard ----
-run('tour', { files: { '/MiniCCTV.cfg': '{"v":1,"photo":0,"alerts":2,"hud":1}' }, fc: { autoMotion: false, free: 12000 } }, [
+// ---- the tour: menus, viewer, camera screen, settings, guard ----
+run('tour', { files: { '/MiniCCTV.cfg': '{"v":3,"alerts":2,"hud":1}' }, fc: { autoMotion: false, free: 12000 } }, [
   { shot: 'menu_main', key: 'sel', when: () => true },                                 // Watch live
   { when: frames(25), run: (L, FC, s) => { s.flags = 2 | 1; s.motion = 38; } },       // recording + motion
   { when: frames(2), shot: 'viewer_live' },
   { when: () => true, key: 'next' },                                                    // photo
   { when: seen(/Saved IMG/), shot: 'viewer_toast', key: 'sel' },                       // actions
-  { shot: 'actions', key: 'next', when: () => true },
-  { key: 'next' }, { key: 'next' }, { key: 'next' }, { key: 'next' }, { key: 'next' },
-  { key: 'esc', when: () => true },                            // close menu
+  { shot: 'actions', key: 'esc', when: () => true },                                   // close it
   { when: frames(8), key: 'prev' },                                                    // back to the main menu
   { shot: 'menu_connected', key: 'next', when: () => true },
-  { key: 'next' }, { key: 'next' }, { key: 'next' },
-  { key: 'sel', when: () => true },                             // Settings
+  { key: 'sel' },                                                                       // Camera (the viewfinder)
+  { when: frames(25), shot: 'camera_photo' },
+  { key: 'next', when: () => true }, { key: 'next' }, { key: 'next' },                  // Burst, Timer, Video
+  { when: frames(6), shot: 'camera_video' },
+  { key: 'sel', when: () => true },                                                     // start a clip
+  { when: frames(10), shot: 'camera_recording', key: 'esc' },                           // UP+DOWN: back to the menu
+  { key: 'next', when: () => true }, { key: 'next' }, { key: 'next' }, { key: 'next' }, // Settings
+  { key: 'sel' },
   { shot: 'settings', key: 'next', when: () => true },
-  { key: 'next' }, { key: 'next' }, { key: 'next' },
+  { key: 'next' }, { key: 'next' },
   { shot: 'settings_mode', key: 'sel', when: () => true },                             // Mode picker
-  { shot: 'mode_picker', key: 'next', when: () => true },
-  { key: 'next' },
-  { key: 'esc', when: () => true },
-  { key: 'next' }, { key: 'next' }, { key: 'next' },
-  { key: 'esc', when: () => true },
-  { key: 'prev' }, { key: 'prev' }, { key: 'prev' },                                   // up to Guard mode
-  { key: 'sel', when: () => true },
+  { shot: 'mode_picker', key: 'esc', when: () => true },
+  { key: 'next', when: () => true }, { key: 'next' }, { key: 'next' },
+  { shot: 'settings_more', key: 'esc', when: () => true },
+  { key: 'prev', when: () => true }, { key: 'prev' }, { key: 'prev' },                  // up to Guard mode
+  { key: 'sel' },
   { when: frames(40), shot: 'guard' },
 ]);
 
@@ -171,7 +173,7 @@ run('no_sd', { fc: { sd: 0 } }, [
 ]);
 // gallery
 run('gallery', { fc: {}, preconnected: true }, [
-  { key: 'next', when: () => true }, { key: 'next' },
+  { key: 'next', when: () => true }, { key: 'next' }, { key: 'next' },
   { key: 'sel' },
   { when: seen(/^PHOTOS$/i), key: 'sel', shot: 'gallery_menu' },
   { when: seen(/^IMG_0041$/), shot: 'gallery_files' },
