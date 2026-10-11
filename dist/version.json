@@ -1,0 +1,11 @@
+{
+  "app": "2.1.0",
+  "app_url": "https://raw.githubusercontent.com/udaydotoffical-svg/mini-cctv/main/bruce/MiniCCTV.js",
+  "app_size": 65492,
+  "fw": "2.1.0",
+  "fw_url": "https://raw.githubusercontent.com/udaydotoffical-svg/mini-cctv/main/dist/firmware-oceanlabz.bin",
+  "fw_size": 1286064,
+  "fw_md5": "c00bcf247841e700d2b28a0f660778ed",
+  "fw_src": "71b66f2a3852f231",
+  "built_with": "esp32 core 3.3.12"
+}

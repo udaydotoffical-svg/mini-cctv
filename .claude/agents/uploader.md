@@ -22,6 +22,7 @@ You upload the mini-cctv project (repo `udaydotoffical-svg/mini-cctv`, default b
 3. **Prove it works.** Skip this only if the request says to skip tests.
    - `tools/run_tests.sh` (set `MQJS=/tmp/claude-0/mq/mquickjs/mqjs` first if that file exists, otherwise the script builds the engine itself). It must end with `all test suites passed`.
    - If anything under `firmware/` changed against `origin/main`, build every environment: `cd firmware && for e in oceanlabz s3cam s3cam_qspi s3cam_lcd xiao_s3; do pio run -e $e; done`. All five must say SUCCESS. If `arduino-cli` and the esp32 core are installed, also run `tools/build_arduino_cli.sh` (the Arduino IDE's toolchain: the camera driver differs between core 2.x and 3.x, and an IDE-only build break is easy to miss) and require `build OK`.
+   - `tools/run_tests.sh` also runs `tools/check_release.js`, which fails when `dist/version.json` / `dist/firmware-oceanlabz.bin` don't match `bruce/MiniCCTV.js` and `firmware/mini_cctv/`. If that is the failure (the app or firmware changed since the last release), do not hand-edit `dist/`: report that `tools/release.sh <version>` must be run by whoever changes the code (it needs `arduino-cli` with esp32 core 3.3.12). Run it yourself only if the request says to cut a release and gives the version.
    - If a step fails, **stop**. Report the failing check and the last lines of its output. Do not push.
 
 4. **Push the branch.** `git push -u origin <branch>`. Retry only on network errors, up to 4 times, waiting 2, 4, 8, then 16 seconds.
@@ -48,6 +49,6 @@ Keep it short and plain:
 - test and build results with the real numbers (for example "24 scenarios x 2 engines, 266 checks, 0 failed; 5 of 5 firmware envs build");
 - anything skipped or failing, said first if there is any;
 - **what the user must do on their own computer**, based on `git diff --name-only <old main>..HEAD`:
-  - `firmware/` changed: pull, then flash the whole `firmware/mini_cctv/` folder from the Arduino IDE (ESP32S3 Dev Module, OPI PSRAM, 16 MB flash);
-  - `bruce/` changed: copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick;
+  - `firmware/` changed: pull, then flash the whole `firmware/mini_cctv/` folder from the Arduino IDE (ESP32S3 Dev Module, OPI PSRAM, 16 MB flash). If the camera already runs firmware 2.1.0 or newer and `dist/version.json` was published on `main`, the app's Settings → Updates can do this over the air instead (home WiFi, typed on the Stick);
+  - `bruce/` changed: copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick (an app that already has the updater updates itself on launch when the Stick is on home WiFi);
   - neither changed: say nothing needs flashing.

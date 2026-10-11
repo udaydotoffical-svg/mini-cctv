@@ -20,7 +20,8 @@ var FC = (function () {
   function reset(opts) {
     st = {
       seq: 1, reqs: 0, mseq: 0, lv: 0, big: 0, motion: 0,
-      mode: 2, sd: 1, rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1,
+      mode: 2, sd: 1, fw: '2.1.0', ota: 0, otamsg: '', gone: 0, updGone: 3, updOk: true, newFw: '2.2.0', updMsg: '', otaReq: null, otaCalls: 0,
+      rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1,
       free: 12000, hist: 90, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '', photoNo: 42,
       autoMotion: false, down: false, hook: null,
       photos: [['IMG_0041.jpg', 61440], ['IMG_0040.jpg', 59392]],
@@ -162,7 +163,7 @@ var FC = (function () {
 
   function stateJson(msg, name) {
     return {
-      z: st.z, px: st.px, py: st.py, f: st.f, n: st.n, fl: st.fl, mi: st.mi, br: st.br, rec: st.rec, auto: st.auto, box: st.box, sharp: st.sharp,
+      fw: st.fw, z: st.z, px: st.px, py: st.py, f: st.f, n: st.n, fl: st.fl, mi: st.mi, br: st.br, rec: st.rec, auto: st.auto, box: st.box, sharp: st.sharp,
       sd: st.sd, free: st.free, ov: st.ov, ago: st.ago, hist: st.hist, play: st.play, mode: st.mode, tl: st.tl,
       cpos: st.cpos, clen: st.clen, name: name || st.name, msg: msg
     };
@@ -180,6 +181,7 @@ var FC = (function () {
     if (q.hasOwnProperty('mi')) { st.mi = parseInt(q.mi, 10) ? 1 : 0; }
     if (q.hasOwnProperty('br')) { st.br = clamp(parseInt(q.br, 10), -2, 2); }
     if (q.hasOwnProperty('auto')) { st.auto = parseInt(q.auto, 10) ? 1 : 0; }
+    if (q.hasOwnProperty('otaclr')) { st.otamsg = ''; }
     if (q.hasOwnProperty('sh')) { st.sharp = parseInt(q.sh, 10) ? 1 : 0; bumpAll(); }
     if (q.hasOwnProperty('box')) { st.box = parseInt(q.box, 10) ? 1 : 0; bumpAll(); }
     if (q.hasOwnProperty('mode')) {
@@ -255,6 +257,90 @@ var FC = (function () {
     return stateJson(msg, name);
   }
 
+  function hexv(c) {
+    return '0123456789abcdef'.indexOf(c.toLowerCase());
+  }
+
+  // the form body the Stick sends: ssid=..&pass=.. (URL-encoded, UTF-8)
+  function formField(body, key) {
+    var parts = body.split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var eq = parts[i].indexOf('=');
+      if (eq > 0 && parts[i].substring(0, eq) === key) {
+        var raw = parts[i].substring(eq + 1);
+        var bytes = [];
+        for (var j = 0; j < raw.length; j++) {
+          var c = raw.charAt(j);
+          if (c === '+') {
+            bytes.push(32);
+          } else if (c === '%') {
+            if (j + 2 >= raw.length) { return null; }
+            var h = hexv(raw.charAt(j + 1));
+            var l = hexv(raw.charAt(j + 2));
+            if (h < 0 || l < 0) { return null; }
+            bytes.push(h * 16 + l);
+            j += 2;
+          } else {
+            bytes.push(raw.charCodeAt(j));
+          }
+        }
+        var out = '';
+        for (var k = 0; k < bytes.length; k++) {
+          var b = bytes[k];
+          if (b < 128) {
+            out += String.fromCharCode(b);
+          } else if (b >= 224 && k + 2 < bytes.length) {
+            out += String.fromCharCode(((b & 15) << 12) | ((bytes[k + 1] & 63) << 6) | (bytes[k + 2] & 63));
+            k += 2;
+          } else if (b >= 192 && k + 1 < bytes.length) {
+            out += String.fromCharCode(((b & 31) << 6) | (bytes[k + 1] & 63));
+            k += 1;
+          } else {
+            return null;
+          }
+        }
+        return out;
+      }
+    }
+    return null;
+  }
+
+  // POST /ota: starts an update. The camera then leaves its WiFi (the test rig drops the Stick's
+  // connection) and comes back after st.updGone join attempts, with the outcome in its status.
+  function otaPost(o) {
+    st.otaCalls++;
+    var ssid = o && typeof o.body === 'string' ? formField(o.body, 'ssid') : null;
+    var pass = o && typeof o.body === 'string' ? formField(o.body, 'pass') : null;
+    if (!o || o.method !== 'POST' || ssid === null || ssid === '') {
+      return { status: 200, body: { ok: 0, msg: 'bad WiFi name' }, length: 0 };
+    }
+    if (st.ota) {
+      return { status: 200, body: { ok: 0, msg: 'already updating' }, length: 0 };
+    }
+    st.otaReq = { ssid: ssid, pass: pass === null ? '' : pass };
+    st.ota = 1;
+    st.gone = st.updGone;
+    return { status: 200, body: { ok: 1, msg: 'updating' }, length: 0 };
+  }
+
+  // called by the test rig when the Stick tries to join the camera's network again
+  function tryJoin() {
+    if (st.gone > 0) {
+      st.gone--;
+      if (st.gone === 0 && st.ota) {
+        st.ota = 0;
+        if (st.updOk) {
+          st.fw = st.newFw;
+          st.otamsg = 'updated to ' + st.newFw;
+        } else {
+          st.otamsg = st.updMsg || 'home WiFi failed: check the name and password';
+        }
+      }
+      return false;
+    }
+    return true;
+  }
+
   // Same shape as Bruce's wifi.httpFetch: {status, body, length}. Throws like it does when the
   // camera is unreachable.
   function handle(url, o) {
@@ -278,9 +364,12 @@ var FC = (function () {
     if (path === '/d') {
       return delta(q.hasOwnProperty('s') ? parseInt(q.s, 10) : 0, q.f === 'j');
     }
+    if (path === '/ota') {
+      return otaPost(o);
+    }
     var body;
     if (path === '/status') {
-      body = { w: W, h: H, bands: NB, band_h: BH, mseq: st.mseq, mode: st.mode, sd: st.sd, rec: st.rec, free_mb: st.free, motion: st.lv };
+      body = { w: W, h: H, bands: NB, band_h: BH, mseq: st.mseq, mode: st.mode, sd: st.sd, rec: st.rec, free_mb: st.free, motion: st.lv, fw: st.fw, ota: st.ota, otamsg: st.otamsg };
     } else if (path === '/ctl') {
       body = ctl(q);
     } else if (path === '/m') {
@@ -304,7 +393,7 @@ var FC = (function () {
 
   reset();
   return {
-    reset: reset, handle: handle, bump: bump, bumpAll: bumpAll, expectedFrame: expectedFrame,
+    reset: reset, handle: handle, tryJoin: tryJoin, bump: bump, bumpAll: bumpAll, expectedFrame: expectedFrame,
     state: function () { return st; }, NB: NB, W: W, H: H, BH: BH
   };
 })();

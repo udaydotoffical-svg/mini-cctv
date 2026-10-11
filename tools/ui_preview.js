@@ -81,14 +81,17 @@ function run(name, opts, steps) {
     if (pending === key) { pending = null; return true; }
     return false;
   };
-  let connected = !!opts.preconnected;
+  let net = opts.home ? 'home' : opts.preconnected ? 'cam' : 'none';
   const mods = {
     display: makeDisplay(scr, { text: (t) => L.texts.push(t) }),
     keyboard: { getEscPress: () => take('esc'), getSelPress: () => take('sel'), getPrevPress: () => take('prev'), getNextPress: () => take('next') },
     wifi: {
-      connected: () => connected, getIPAddress: () => (connected ? '192.168.4.2' : null),
-      connect: () => { CLOCK += 1000; connected = !opts.joinFails; return connected; }, connectDialog: () => true, disconnect: () => { connected = false; },
+      connected: () => net !== 'none', getIPAddress: () => (net === 'cam' ? '192.168.4.2' : net === 'home' ? '192.168.1.50' : null),
+      connect: (ssid) => { CLOCK += 1000; if (opts.joinFails) return false; net = ssid === 'ESP32-CAM-S3' ? 'cam' : 'home'; return true; }, connectDialog: () => { net = 'home'; return true; }, disconnect: () => { net = 'none'; },
       httpFetch: (url, o) => {
+        if (url.indexOf('https://') === 0) { // the "internet": the list of latest versions
+          return { status: 200, body: { app: '2.2.0', app_url: url.replace('dist/version.json', 'bruce/MiniCCTV.js'), app_size: 66000, fw: '2.2.0' }, length: 0 };
+        }
         if (/\/d\?/.test(url)) {
           const since = parseInt(/s=(\d+)/.exec(url)[1], 10);
           CLOCK += 60;
@@ -120,6 +123,8 @@ function run(name, opts, steps) {
   };
   ctx.MODS = mods;
   ctx.require = (n) => mods[n];
+  ctx.__filepath = '/BruceJS/MiniCCTV.js'; // Bruce tells a script where it lives
+  ctx.__dirpath = '/BruceJS/';
   ctx.state = state;
   try { vm.runInContext(appSrc, ctx, { filename: 'MiniCCTV.js' }); } catch (e) { console.log(`  ${name}: app threw ${e.message}`); failed = true; }
   if (L.stalled !== undefined) console.log(`  ${name}: stalled at step ${L.stalled}: ${JSON.stringify(Object.keys(steps[L.stalled]))} ${steps[L.stalled].when ? steps[L.stalled].when.toString().slice(0, 80) : ''}`);
@@ -155,10 +160,20 @@ run('tour', { files: { '/MiniCCTV.cfg': '{"v":3,"alerts":2,"hud":1}' }, fc: { au
   { shot: 'settings_mode', key: 'sel', when: () => true },                             // Mode picker
   { shot: 'mode_picker', key: 'esc', when: () => true },
   { key: 'next', when: () => true }, { key: 'next' }, { key: 'next' },
-  { shot: 'settings_more', key: 'esc', when: () => true },
+  { shot: 'settings_more', key: 'next', when: () => true },
+  { key: 'next' }, { key: 'next' }, { key: 'next' },
+  { shot: 'settings_versions', key: 'esc', when: () => true },
   { key: 'prev', when: () => true }, { key: 'prev' }, { key: 'prev' },                  // up to Guard mode
   { key: 'sel' },
   { when: frames(40), shot: 'guard' },
+]);
+
+// the update flow, started at launch on a home WiFi
+run('update', { home: true, files: { '/MiniCCTV.cfg': '{"v":4,"alerts":2,"hud":1,"camFw":"2.1.0","homeSsid":"Home"}' }, fc: { fw: '2.1.0' } }, [
+  { onDelay: true, when: seen(/Installing in 3 s/), shot: 'update_app' },
+  { key: 'prev', when: () => true },                                                   // skip the app update
+  { shot: 'update_camera', key: 'sel', when: seen(/Check and update it now/) },        // yes
+  { shot: 'update_confirm', key: 'prev', when: seen(/Next: your home WiFi name/) },    // later
 ]);
 
 // camera not reachable

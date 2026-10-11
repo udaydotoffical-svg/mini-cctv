@@ -29,23 +29,24 @@ function liveHeap(app) {
   const m = /heap size=(\d+)\//.exec(r.stdout + r.stderr);
   return m ? Number(m[1]) : NaN;
 }
-function worksAt(app, limit) {
-  const r = run(app, 'footprint', limit, []);
+function worksAt(app, limit, scenario) {
+  const r = run(app, scenario, limit, []);
   const text = r.stdout + r.stderr;
   return !/out of memory/i.test(text) && /SUMMARY passed=1 failed=0/.test(text);
 }
-function minimum(app) {
+function minimum(app, scenario) {
   let lo = 32 * 1024, hi = 4 * 1024 * 1024;
-  if (!worksAt(app, hi)) return NaN;
+  if (!worksAt(app, hi, scenario)) return NaN;
   while (hi - lo > 2048) {
     const mid = (lo + hi) >> 1;
-    if (worksAt(app, mid)) hi = mid; else lo = mid;
+    if (worksAt(app, mid, scenario)) hi = mid; else lo = mid;
   }
   return hi;
 }
 const kb = (n) => (n / 1024).toFixed(0) + ' KB';
 const baseLive = liveHeap(appEmpty), appLive = liveHeap(appReal);
-const peak = minimum(appReal);
+const peak = minimum(appReal, 'footprint');
+const updatePeak = minimum(appReal, 'update_footprint');
 console.log(`source file                : ${kb(fs.statSync(appReal).size)}`);
 console.log(`static cost (code, strings, buffers): ~${kb(appLive - baseLive)}`);
 if (Number.isNaN(peak)) {
@@ -53,4 +54,5 @@ if (Number.isNaN(peak)) {
   process.exit(1);
 }
 console.log(`working peak while streaming: ~${kb(peak - baseLive)}  (includes the test rig's own copy of each reply)`);
+console.log(Number.isNaN(updatePeak) ? 'self-update: the update scenario failed even with a 4 MB heap' : `installing a 63 KB app update: ~${kb(updatePeak - baseLive)}  (the update list, the 63 KB download and the app itself)`);
 console.log(`Bruce gives the interpreter about 250 KB with PSRAM (every Stick Plus2), only ~64 KB without.`);

@@ -35,6 +35,8 @@ The file is `bruce/MiniCCTV.js` and it goes to `/BruceJS/MiniCCTV.js` on the Sti
 - Ask me: is the Stick's SD card mounted on this computer? If yes, ask for the mount path (do not guess it), `mkdir -p <mount>/BruceJS`, copy the file, check it with `cmp bruce/MiniCCTV.js <mount>/BruceJS/MiniCCTV.js`, run `sync`, and tell me to eject the card properly.
 - If not, give me the Bruce WebUI route: on the Stick open the Bruce menu, start the Web UI, open the address it shows in a browser on this computer, and upload `bruce/MiniCCTV.js` into `/BruceJS/` there. Tell me where the file is on this computer (full path).
 
+Note for later: once firmware 2.1.0 and this app are installed, further updates can be done over the air (Settings → Updates on the Stick, on home WiFi), so this command is only needed for the first install or if an update fails.
+
 ## 4. Finish with a short report
 
 Say what is now on the camera and on the Stick (git short hash), paste the key serial lines, and list what is left for me to do by hand. Then give me this smoke test for the Stick: open JS Interpreter and run MiniCCTV.js (it joins the camera's WiFi by itself), open Settings and check the rows, then Watch live and check the picture and the info line at the top.

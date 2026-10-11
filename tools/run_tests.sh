@@ -27,6 +27,11 @@ $CXX tools/test_delta.cpp -o "$tmp/test_delta"
 "$tmp/test_delta" "$tmp/golden" | grep -E "FAIL|passed" || true
 "$tmp/test_delta" "$tmp/golden" >/dev/null
 
+echo "== over-the-air update helpers"
+$CXX tools/test_ota.cpp -o "$tmp/test_ota"
+"$tmp/test_ota" dist/version.json | grep -E "FAIL|passed" || true
+"$tmp/test_ota" dist/version.json >/dev/null
+
 echo "== AVI writer and reader"
 mkdir "$tmp/avi"
 python3 -I - "$tmp/avi" <<'PY'
@@ -62,4 +67,8 @@ node tools/mutate.js "$tmp/golden"
 
 echo "== Every screen renders (and nothing is drawn off-screen)"
 node tools/ui_preview.js "$tmp/screens"
+if [ -z "${SKIP_RELEASE_CHECK:-}" ]; then
+  echo "== Is the published release (dist/) consistent with the source?"
+  node tools/check_release.js
+fi
 echo "all test suites passed"

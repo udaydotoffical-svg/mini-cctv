@@ -48,6 +48,8 @@
 #include "filters.h"
 #include "history.h"
 #include "jpegtools.h"
+#include "ota.h"
+#include "otaupdate.h"
 #include "modes.h"
 #include "motion.h"
 #include "rec_policy.h"
@@ -470,6 +472,10 @@ static void captureTask(void *) {
     const MotionParams mp = {MOTION_LUMA_THRESH, MOTION_MIN_CELLS, MOTION_BIG_TENTHS, MOTION_GLOBAL_PCT, MOTION_HOLD_MS};
 
     for (;;) {
+        if (g_otaBusy) { // an update is running: leave the camera and the CPU alone
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
         const uint32_t waitStartUs = micros();
         camera_fb_t *fb = esp_camera_fb_get();
         const uint32_t gotUs = micros();
@@ -783,6 +789,7 @@ static esp_err_t ctlHandler(httpd_req_t *req) {
     if (has("fl")) { g_vflip = atoi(v) != 0; g_sensorDirty = true; }
     if (has("mi")) { g_mirror = atoi(v) != 0; g_sensorDirty = true; }
     if (has("br")) { g_bright = viewClamp(atoi(v), -2, 2); g_sensorDirty = true; }
+    if (has("otaclr")) otaClearMsg();
     if (has("sh")) {
         const bool b = atoi(v) != 0;
         if (b != g_sharp) {
@@ -880,10 +887,10 @@ static esp_err_t ctlHandler(httpd_req_t *req) {
     char json[560];
     const int n = snprintf(json, sizeof json,
                            "{\"z\":%d,\"px\":%d,\"py\":%d,\"f\":%d,\"n\":%d,\"fl\":%d,\"mi\":%d,\"br\":%d,\"rec\":%d,"
-                           "\"auto\":%d,\"box\":%d,\"sharp\":%d,\"sd\":%d,\"free\":%lu,\"ov\":%d,\"ago\":%lu,\"hist\":%lu,\"play\":%d,\"mode\":%d,\"tl\":%lu,"
+                           "\"fw\":\"%s\",\"auto\":%d,\"box\":%d,\"sharp\":%d,\"sd\":%d,\"free\":%lu,\"ov\":%d,\"ago\":%lu,\"hist\":%lu,\"play\":%d,\"mode\":%d,\"tl\":%lu,"
                            "\"cpos\":%lu,\"clen\":%lu,\"name\":\"%s\",\"msg\":\"%s\"}",
                            g_view.zoom10, g_view.px, g_view.py, (int)g_filter, g_night ? 1 : 0, g_vflip ? 1 : 0,
-                           g_mirror ? 1 : 0, (int)g_bright, g_recording ? 1 : 0, g_autoRec ? 1 : 0, g_boxOn ? 1 : 0, g_sharp ? 1 : 0, g_sdOk ? 1 : 0,
+                           g_mirror ? 1 : 0, (int)g_bright, g_recording ? 1 : 0, FW_VERSION, g_autoRec ? 1 : 0, g_boxOn ? 1 : 0, g_sharp ? 1 : 0, g_sdOk ? 1 : 0,
                            (unsigned long)g_sdFreeMB, (int)g_ovMode, (unsigned long)(g_ovMode == OV_REWIND ? (millis() - g_ovPosT) / 1000 : 0),
                            (unsigned long)(g_histSpanMs / 1000), g_ovPlay ? 1 : 0, (int)g_mode, (unsigned long)g_tlSec,
                            (unsigned long)(g_clipPosMs / 1000),
@@ -997,19 +1004,62 @@ static esp_err_t jpgHandler(httpd_req_t *req) {
     return r;
 }
 
+// POST /ota with a form body: ssid=<home WiFi name>&pass=<password> (URL-encoded). Starts the update.
+static esp_err_t otaHandler(httpd_req_t *req) {
+    char body[240];
+    const int total = (int)req->content_len;
+    int code = 0;
+    const char *msg = "updating";
+    if (g_otaBusy) {
+        msg = "already updating";
+    } else if (total <= 0 || total >= (int)sizeof body) {
+        msg = "bad request";
+    } else {
+        int got = 0;
+        while (got < total) {
+            const int r = httpd_req_recv(req, body + got, total - got);
+            if (r <= 0) break;
+            got += r;
+        }
+        body[got < total ? got : total] = 0;
+        char rs[120], rp[220], ssid[40], pass[72];
+        if (got != total || httpd_query_key_value(body, "ssid", rs, sizeof rs) != ESP_OK ||
+            otaUrlDecode(rs, strlen(rs), ssid, sizeof ssid) < 1) {
+            msg = "bad WiFi name";
+        } else {
+            if (httpd_query_key_value(body, "pass", rp, sizeof rp) != ESP_OK) rp[0] = 0; // an open network has none
+            if (otaUrlDecode(rp, strlen(rp), pass, sizeof pass) < 0) {
+                msg = "bad password";
+            } else if (!otaStart(ssid, pass)) {
+                msg = "could not start";
+            } else {
+                code = 1;
+            }
+        }
+        memset(body, 0, sizeof body);
+        memset(rp, 0, sizeof rp);
+    }
+    char json[96];
+    const int n = snprintf(json, sizeof json, "{\"ok\":%d,\"msg\":\"%s\"}", code, msg);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n);
+}
+
 static esp_err_t statusHandler(httpd_req_t *req) {
-    char json[460];
+    char json[720];
+    char otaMsg[80];
+    otaGetMsg(otaMsg, sizeof otaMsg);
     xSemaphoreTake(g_mtx, portMAX_DELAY);
     const uint32_t seq = g_ds.seq;
     xSemaphoreGive(g_mtx);
     const int n = snprintf(json, sizeof(json),
              "{\"fps\":%.1f,\"seq\":%lu,\"updates\":%lu,\"w\":%d,\"h\":%d,\"bands\":%d,\"band_h\":%d,"
              "\"ms_loop\":%lu,\"ms_wait\":%lu,\"motion\":%d,\"mseq\":%lu,\"mode\":%d,\"rec\":%d,\"sd\":%d,\"free_mb\":%lu,"
-             "\"hist_s\":%lu,\"dec\":%d,\"free_heap\":%u,\"free_psram\":%u}",
+             "\"hist_s\":%lu,\"dec\":%d,\"free_heap\":%u,\"free_psram\":%u,\"fw\":\"%s\",\"ota\":%d,\"otamsg\":\"%s\"}",
              (double)g_fps, (unsigned long)seq, (unsigned long)g_updates, OUT_W, OUT_H, NBANDS, BAND_H,
              (unsigned long)(g_msLoop / 1000), (unsigned long)(g_msWait / 1000), (int)g_motionLevel,
              (unsigned long)g_motionSeq, (int)g_mode, g_recording ? 1 : 0, g_sdOk ? 1 : 0, (unsigned long)g_sdFreeMB, (unsigned long)(g_histSpanMs / 1000), g_decLayout,
-             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(), FW_VERSION, g_otaBusy ? 1 : 0, otaMsg);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n);
 }
@@ -1075,7 +1125,7 @@ static void startServers() {
         {"/ctl", HTTP_GET, ctlHandler, nullptr},   {"/files", HTTP_GET, filesHandler, nullptr},
         {"/f", HTTP_GET, fileHandler, nullptr},    {"/gallery", HTTP_GET, galleryHandler, nullptr},
         {"/jpg", HTTP_GET, jpgHandler, nullptr},   {"/status", HTTP_GET, statusHandler, nullptr},
-        {"/", HTTP_GET, indexHandler, nullptr},
+        {"/", HTTP_GET, indexHandler, nullptr},    {"/ota", HTTP_POST, otaHandler, nullptr},
     };
     if (httpd_start(&g_httpd, &cfg) == ESP_OK)
         for (auto &u : uris) httpd_register_uri_handler(g_httpd, &u);
@@ -1112,7 +1162,7 @@ static uint8_t *psramAlloc(size_t n) { return (uint8_t *)heap_caps_calloc(1, n, 
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.println("\nmini-cctv camera node");
+    Serial.println("\nmini-cctv camera node v" FW_VERSION); // release.sh checks that this text is in the published image
 
     if (!psramFound()) {
         Serial.println("PSRAM not found: Arduino IDE > Tools > PSRAM = \"OPI PSRAM\" (PlatformIO: qio_opi vs qio_qspi env)");

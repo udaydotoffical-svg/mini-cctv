@@ -30,6 +30,9 @@ var PASSED = 0;
 
 // What Bruce provides to a script. These must be real top-level declarations: in mquickjs, properties
 // added to the global object are not visible as global variables.
+// Bruce tells a script where it lives
+var __filepath = '/BruceJS/MiniCCTV.js';
+var __dirpath = '/BruceJS/';
 var MODS = {};
 function require(n) {
   return MODS[n];
@@ -136,12 +139,14 @@ function runApp(opts) {
     texts: [], titles: [], menuDraws: 0, jpgs: [], bitmaps: [], urls: [], tones: [], blinks: 0, irs: [],
     joins: 0, disconnects: 0, brightness: [], restores: 0, fills: 0, ticks: 0, maxTicks: opts.maxTicks || 30000,
     timeout: false, error: '', fb: new Uint8Array(opts.light ? 1 : W * H), noSignal: 0, jpgCount: 0, bitmapCount: 0,
-    files: opts.files || {}, writes: 0, icons: 0, gradients: 0, flashes: 0
+    files: opts.files || {}, writes: 0, prompts: [], webUrls: [], renames: 0, fsUsed: {}, dialogs: 0, netLog: [], icons: 0, gradients: 0, flashes: 0
   };
   var curSize = 1;
   var curColor = 0;
   var pending = null;
-  var connected = !!opts.preconnected;
+  // Which network the Stick is on: the camera's, the home WiFi, or none. The camera is reachable only
+  // from its own network and GitHub only from the home one, like the real thing.
+  var net = opts.homeWifi ? 'home' : opts.preconnected ? 'cam' : 'none';
 
   function take(name) {
     L.ticks++;
@@ -278,28 +283,63 @@ function runApp(opts) {
     getEscPress: function () { return take('esc'); },
     getSelPress: function () { return take('sel'); },
     getPrevPress: function () { return take('prev'); },
-    getNextPress: function () { return take('next'); }
+    getNextPress: function () { return take('next'); },
+    // the typed-text prompt: keyboard(initialText, maxLength, message, mask)
+    keyboard: function (initial, max, msg, mask) {
+      L.prompts.push({ initial: initial, max: max, msg: msg, mask: mask === true });
+      return opts.typed && opts.typed.length ? opts.typed.shift() : '';
+    }
   };
 
   var MOCK_wifi = {
-    connected: function () { return connected; },
-    getIPAddress: function () { return connected ? '192.168.4.2' : null; },
-    connect: function () {
+    connected: function () { return net !== 'none'; },
+    getIPAddress: function () { return net === 'cam' ? '192.168.4.2' : net === 'home' ? '192.168.1.50' : null; },
+    connect: function (ssid) {
       L.joins++;
       CLOCK += 1000;
-      if (opts.joinFails) {
-        return false;
+      if (ssid === 'ESP32-CAM-S3') {
+        if (opts.joinFails || !FC.tryJoin()) {
+          return false;
+        }
+        net = 'cam';
+        L.netLog.push('cam');
+        return true;
       }
-      connected = true;
+      net = 'home';
+      L.netLog.push('home');
       return true;
     },
-    connectDialog: function () { connected = true; return true; },
-    disconnect: function () { L.disconnects++; connected = false; },
+    connectDialog: function () {
+      L.dialogs++;
+      if (opts.homeFails) {
+        return false;
+      }
+      net = 'home';
+      L.netLog.push('home');
+      return true;
+    },
+    disconnect: function () { L.disconnects++; net = 'none'; L.netLog.push('none'); },
     httpFetch: function (url, o) {
+      if (url.indexOf('http://192.168.4.1') !== 0) {
+        // the internet: needs the home WiFi
+        L.webUrls.push(url);
+        CLOCK += 200;
+        if (net !== 'home') {
+          throw new Error('WIFI Not Connected');
+        }
+        var w = opts.web ? opts.web(url, o) : null;
+        if (w === 'throw' || !w) {
+          throw new Error('connect failed');
+        }
+        return w;
+      }
       if (!opts.light) {
         L.urls.push(url);
       }
       CLOCK += 30;
+      if (net !== 'cam') {
+        throw new Error('WIFI Not Connected');
+      }
       if (opts.fetch) {
         var r = opts.fetch(url, L.urls.length, L);
         if (r === 'throw') {
@@ -313,6 +353,10 @@ function runApp(opts) {
       if (res.body instanceof Uint8Array) {
         // Bruce hands back a fresh copy starting at offset 0
         res = { status: res.status, body: new Uint8Array(res.body), length: res.length };
+      }
+      if (/\/ota$/.test(url) && FC.state().ota === 1) {
+        net = 'none'; // the camera has dropped its network to go and update
+        L.netLog.push('none');
       }
       return res;
     }
@@ -345,6 +389,47 @@ function runApp(opts) {
       }
       L.files[spath(p)] = mode === 'write' || !L.files.hasOwnProperty(spath(p)) ? data : L.files[spath(p)] + data;
       L.writes++;
+      L.fsUsed[spath(p)] = typeof p === 'object' ? p.fs : 'littlefs';
+      if (opts.writeFails && spath(p).indexOf(opts.writeFails) >= 0) {
+        return false;
+      }
+      return true;
+    },
+    // names of the files directly inside a folder; the folder exists on one filesystem only
+    readdir: function (p, o) {
+      if (typeof p !== 'object' || p.fs !== (opts.selfFs || 'sd')) {
+        throw new TypeError('storageReaddir: Directory does not exist: ' + spath(p));
+      }
+      var dir = spath(p);
+      if (dir.charAt(dir.length - 1) !== '/') {
+        dir += '/';
+      }
+      var names = [];
+      for (var k in L.files) {
+        if (L.files.hasOwnProperty(k) && k.indexOf(dir) === 0 && k.indexOf('/', dir.length) < 0) {
+          names.push(o && o.withFileTypes ? { name: k.substring(dir.length), size: L.files[k].length, isDirectory: false } : k.substring(dir.length));
+        }
+      }
+      return names;
+    },
+    remove: function (p) {
+      if (!L.files.hasOwnProperty(spath(p))) {
+        throw new TypeError('storageRemove: File: ' + spath(p) + ' does not exist');
+      }
+      delete L.files[spath(p)];
+      return true;
+    },
+    // like FAT: renaming onto a file that exists fails
+    rename: function (p, to) {
+      L.renames++;
+      if (!L.files.hasOwnProperty(spath(p))) {
+        throw new TypeError('storageRename: File: ' + spath(p) + ' does not exist');
+      }
+      if (L.files.hasOwnProperty(to) || (opts.renameFailsAt && L.renames === opts.renameFailsAt)) {
+        return false;
+      }
+      L.files[to] = L.files[spath(p)];
+      delete L.files[spath(p)];
       return true;
     }
   };
@@ -796,7 +881,7 @@ SCENARIOS.settings_auto_record = function () {
   check('the first press connects once and then switches auto-record off', L.joins === 1 && countUrls(L, /\/ctl\?auto=0$/) === 1);
   check('the second press switches it back on', countUrls(L, /\/ctl\?auto=1$/) === 1 && FC.state().auto === 1);
   check('the row shows the camera\'s state (an OFF toggle after the first press)', anyText(L, /^OFF$/) && anyText(L, /^ON$/));
-  check('auto-record is not a Stick setting: nothing is written to the Stick', L.writes === 0);
+  check('auto-record is not a Stick setting: it is not in the Stick\'s file (only the camera version it saw is)', L.writes <= 1 && (L.files['/MiniCCTV.cfg'] || '').indexOf('auto') < 0);
 
   // outside Security mode the row says where it applies
   FC.reset({ auto: 1, mode: 1 });
@@ -829,7 +914,7 @@ SCENARIOS.settings_persist = function () {
   }
   check('app ran without throwing', L.error === '', L.error);
   check('each change is written (two writes) and the file is one valid JSON object', L.writes === 2 && saved !== null, '(' + L.files['/MiniCCTV.cfg'] + ')');
-  check('the file holds the new defaults', saved !== null && saved.alerts === 0 && saved.hud === 0 && saved.v === 3);
+  check('the file holds the new defaults', saved !== null && saved.alerts === 0 && saved.hud === 0 && saved.v === 4);
   check('no camera was needed for any of it', L.urls.length === 0);
   check('the rows show the new values', anyText(L, /^Off$/));
 
@@ -858,7 +943,10 @@ SCENARIOS.settings_persist = function () {
   for (var i = 0; i < bad.length; i++) {
     FC.reset();
     L = runApp({ files: { '/MiniCCTV.cfg': bad[i] }, keys: script([{ when: MENU(1), key: 'sel' }, { when: function (l) { return l.bitmaps.length >= 3; }, key: 'prev' }, { when: MENU(2), key: 'esc' }]) });
-    if (L.error !== '' || L.bitmaps.length < 3 || L.writes !== 0 || hud !== true || alertLevel !== 2) {
+    var fixed = null;
+    try { fixed = JSON.parse(L.files['/MiniCCTV.cfg']); } catch (eFix) { fixed = null; }
+    // the app falls back to its defaults, and what it saves afterwards (the camera version) is a valid file
+    if (L.error !== '' || L.bitmaps.length < 3 || hud !== true || alertLevel !== 2 || (L.writes > 0 && (!fixed || fixed.alerts !== 2 || fixed.hud !== 1))) {
       okAll = false;
       out('  bad config ' + JSON.stringify(bad[i]) + ' -> error "' + L.error + '", ' + L.bitmaps.length + ' bands, hud ' + hud + ', alerts ' + alertLevel);
     }
@@ -906,7 +994,7 @@ SCENARIOS.settings_person_box_and_sharpen = function () {
   check('Person box switches the camera\'s box off', countUrls(L, /\/ctl\?box=0$/) === 1 && FC.state().box === 0);
   check('Sharpen toggles off and on again', countUrls(L, /\/ctl\?sh=0$/) === 1 && countUrls(L, /\/ctl\?sh=1$/) === 1 && FC.state().sharp === 1);
   check('the rows show the hints for what they do', anyText(L, /Red box: person-sized/) && anyText(L, /Crisper edges/));
-  check('both are camera settings: nothing is written to the Stick', L.writes === 0);
+  check('both are camera settings: neither is in the Stick\'s file', (L.files['/MiniCCTV.cfg'] || '').indexOf('box') < 0 && (L.files['/MiniCCTV.cfg'] || '').indexOf('sharp') < 0);
 };
 
 SCENARIOS.camera_screen = function () {
@@ -984,6 +1072,297 @@ SCENARIOS.no_flashing = function () {
     keys: script([{ when: MENU(1), key: 'sel' }, { when: function () { return reqs > 30; }, key: 'prev' }, { when: MENU(2), key: 'esc' }])
   });
   check('a signal outage and recovery does not flash either', L.noSignal >= 1 && L.flashes === 0 && L.jpgCount === 0);
+};
+
+// ---------------------------------------------------------------------------------------------
+// Updates. The test "internet" serves the list of versions and the app; the camera does its own
+// downloading in real life, so the Stick never fetches firmware (a test checks that).
+var BASE = 'https://raw.githubusercontent.com/udaydotoffical-svg/mini-cctv/main/';
+// stand-ins for the real app: big enough to pass the "plausible size" check, and shaped like it
+// (a version line, ends with main();)
+var FILL = (function () { var f = ''; for (var i = 0; i < 80; i++) { f += '// padding padding padding\n'; } return f; })();
+function appText(ver) {
+  return '// MiniCCTV ' + ver + '\n' + FILL + 'var APP_VERSION = \'' + ver + '\';\nvar more = 1;\nmain();\n';
+}
+var OLD_APP = appText('2.1.0');
+var NEW_APP = appText('2.2.0');
+var CFG_NOW = '{"v":4,"alerts":2,"hud":1,"camFw":"2.1.0","homeSsid":"OldHome"}';
+var PASSWORD = 'p@ss&w=r+d% /';
+var SSID = 'Caf\u00e9 5G & Co=1'; // a home WiFi name with a space, an accent, & and =
+
+function webFor(o) {
+  o = o || {};
+  var text = o.text === undefined ? NEW_APP : o.text;
+  return function (url) {
+    if (/dist\/version\.json$/.test(url)) {
+      if (o.listFails) { return 'throw'; }
+      var m = { app: o.app || '2.2.0', app_url: o.appUrl || BASE + 'bruce/MiniCCTV.js', app_size: o.size === undefined ? NEW_APP.length : o.size, fw: o.fw === undefined ? '2.1.0' : o.fw };
+      return { status: 200, body: m, length: 0 };
+    }
+    if (/bruce\/MiniCCTV\.js$/.test(url)) {
+      if (o.appThrows) { return 'throw'; }
+      return { status: o.appStatus || 200, body: text, length: o.length === undefined ? text.length : o.length };
+    }
+    return { status: 404, body: '', length: 0 };
+  };
+}
+
+function noSecrets(L) {
+  var leaked = false;
+  for (var k in L.files) {
+    if (L.files.hasOwnProperty(k) && L.files[k].indexOf('p@ss') >= 0) { leaked = true; }
+  }
+  return !leaked && !anyText(L, /p@ss/) && !anyText(L, /r\+d/);
+}
+
+SCENARIOS.update_helpers = function () {
+  FC.reset();
+  var L = runApp({ keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('app ran without throwing', L.error === '', L.error);
+  check('version numbers parse like the camera\'s', verNum('2.10.3') === 2010003 && verNum('0.0.1') === 1 && verNum('999.999.999') === 999999999);
+  check('anything else is not a version', verNum('') === -1 && verNum('2.1') === -1 && verNum('2.1.0.1') === -1 && verNum('v2.1.0') === -1 && verNum('2.1.x') === -1 && verNum('1000.0.0') === -1 && verNum(null) === -1 && verNum(210) === -1);
+  check('newer compares numbers, not text', newer('2.10.0', '2.9.0') && !newer('2.9.0', '2.10.0') && newer('2.1.1', '2.1.0') && !newer('2.1.0', '2.1.0'));
+  check('an unreadable version is older than any real one, and never newer', newer('1.0.0', '') && newer('1.0.0', 'garbage') && !newer('garbage', '1.0.0') && !newer('x', 'y'));
+  check('urlEncode keeps the safe characters', urlEncode('AZaz09-_.~') === 'AZaz09-_.~');
+  check('urlEncode escapes every special character in a password', urlEncode(PASSWORD) === 'p%40ss%26w%3Dr%2Bd%25%20%2F', urlEncode(PASSWORD));
+  check('urlEncode turns non-ASCII into UTF-8', urlEncode('é€') === '%C3%A9%E2%82%AC', urlEncode('é€'));
+};
+
+SCENARIOS.update_app_installs = function () {
+  FC.reset();
+  var L = runApp({
+    homeWifi: true,
+    files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP },
+    web: webFor(),
+    keys: script([{ when: function (l) { return anyText(l, /App updated/); }, key: 'sel' }])
+  });
+  check('app ran without throwing', L.error === '', L.error);
+  check('it asked GitHub for the list and then the app, nothing else', L.webUrls.length === 2 && /version\.json$/.test(L.webUrls[0]) && /bruce\/MiniCCTV\.js$/.test(L.webUrls[1]), L.webUrls.join(' '));
+  check('the new app replaced the old one', L.files['/BruceJS/MiniCCTV.js'] === NEW_APP);
+  check('the old app is kept as MiniCCTV.js.bak, and no half-written file is left', L.files['/BruceJS/MiniCCTV.js.bak'] === OLD_APP && !L.files.hasOwnProperty('/BruceJS/MiniCCTV.js.new'));
+  check('it was written on the filesystem the app lives on (the SD card)', L.fsUsed['/BruceJS/MiniCCTV.js.new'] === 'sd');
+  check('the screen said what was happening', anyText(L, /App update/) && anyText(L, /Downloading v2\.2\.0/) && anyText(L, /Now v2\.2\.0/));
+  check('then the app ended, to be reopened (the main menu never showed)', L.menuDraws === 0 && L.urls.length === 0);
+
+  // an app that lives in the Stick's own flash
+  FC.reset();
+  L = runApp({ homeWifi: true, selfFs: 'littlefs', files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP }, web: webFor(), keys: script([{ when: function (l) { return anyText(l, /App updated/); }, key: 'sel' }]) });
+  check('an app in the Stick\'s flash is replaced in the Stick\'s flash', L.files['/BruceJS/MiniCCTV.js'] === NEW_APP && L.fsUsed['/BruceJS/MiniCCTV.js.new'] === 'littlefs');
+
+  // UP during the 3 second notice skips it
+  FC.reset();
+  L = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP }, web: webFor(), keys: script([{ when: function (l) { return anyText(l, /Installing in 3 s/); }, key: 'prev' }, { when: MENU(1), key: 'esc' }]) });
+  check('UP during the notice skips the update and goes on to the menu', L.files['/BruceJS/MiniCCTV.js'] === OLD_APP && L.webUrls.length === 1 && L.menuDraws >= 1);
+};
+
+SCENARIOS.update_app_refuses_bad_downloads = function () {
+  var cases = [
+    ['a size that does not match the list', { length: NEW_APP.length + 1 }],
+    ['a body shorter than the list says', { size: NEW_APP.length + 50 }],
+    ['a file that is not the announced version', { text: appText('2.1.5'), size: appText('2.1.5').length }],
+    ['a file cut off before its end', { text: NEW_APP.substring(0, NEW_APP.length - 8), size: NEW_APP.length - 8 }],
+    ['an HTTP error', { appStatus: 500 }],
+    ['a download that throws', { appThrows: true }],
+    ['a card that will not take the file', { writeFails: '.new' }]
+  ];
+  for (var i = 0; i < cases.length; i++) {
+    FC.reset();
+    var c = cases[i][1];
+    var L = runApp({
+      homeWifi: true,
+      writeFails: c.writeFails,
+      files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP },
+      web: webFor(c),
+      keys: script([{ when: function (l) { return anyText(l, /Update failed/); }, key: 'sel' }, { when: MENU(1), key: 'esc' }])
+    });
+    var untouched = L.files['/BruceJS/MiniCCTV.js'] === OLD_APP && !L.files.hasOwnProperty('/BruceJS/MiniCCTV.js.new') && !L.files.hasOwnProperty('/BruceJS/MiniCCTV.js.bak');
+    check('refused: ' + cases[i][0] + ' (the app is left exactly as it was, and says the update failed)', L.error === '' && untouched && anyText(L, /Update failed/) && anyText(L, /unchanged/) && L.menuDraws >= 1, '(' + L.texts.slice(-6).join(' | ') + ')');
+  }
+
+  // a list that points outside this repository, or is nonsense, is ignored and the download is never made
+  var lists = [{ appUrl: 'https://evil.example.com/MiniCCTV.js' }, { app: 'two' }, { size: 5 }, { size: 9999999 }];
+  var all = true;
+  for (var j = 0; j < lists.length; j++) {
+    FC.reset();
+    var L2 = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP }, web: webFor(lists[j]), keys: script([{ when: MENU(1), key: 'esc' }]) });
+    if (L2.error !== '' || L2.files['/BruceJS/MiniCCTV.js'] !== OLD_APP || L2.webUrls.length !== 1 || L2.menuDraws < 1) { all = false; out('  bad list ' + j + ': ' + L2.webUrls.join(' ')); }
+  }
+  check('a list that points outside the repository, or is nonsense, is ignored and nothing is downloaded', all);
+};
+
+SCENARIOS.update_app_swap_is_safe = function () {
+  // the swap is two renames: old -> .bak, then new -> app. A failure in either must leave a working app.
+  var at = [1, 2];
+  for (var i = 0; i < at.length; i++) {
+    FC.reset();
+    var L = runApp({
+      homeWifi: true, renameFailsAt: at[i],
+      files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP },
+      web: webFor(),
+      keys: script([{ when: function (l) { return anyText(l, /Update failed/); }, key: 'sel' }, { when: MENU(1), key: 'esc' }])
+    });
+    check('rename #' + at[i] + ' failing leaves the old app in place, with no stray files', L.files['/BruceJS/MiniCCTV.js'] === OLD_APP && !L.files.hasOwnProperty('/BruceJS/MiniCCTV.js.new') && !L.files.hasOwnProperty('/BruceJS/MiniCCTV.js.bak') && anyText(L, /could not replace/), '(' + Object.keys(L.files).join(',') + ')');
+  }
+  // an old .bak from an earlier update does not get in the way (FAT will not rename onto an existing file)
+  FC.reset();
+  var L3 = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP, '/BruceJS/MiniCCTV.js.bak': '// two versions ago' }, web: webFor(), keys: script([{ when: function (l) { return anyText(l, /App updated/); }, key: 'sel' }]) });
+  check('an older .bak is replaced by the newer one', L3.files['/BruceJS/MiniCCTV.js'] === NEW_APP && L3.files['/BruceJS/MiniCCTV.js.bak'] === OLD_APP);
+};
+
+SCENARIOS.update_not_needed = function () {
+  var up = webFor({ app: '2.1.0', fw: '2.1.0' });
+  // current everywhere: straight to the menu, quietly
+  FC.reset();
+  var L = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP }, web: up, keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('up to date: one look at the list, no download, no writes, then the menu', L.webUrls.length === 1 && L.writes === 0 && L.files['/BruceJS/MiniCCTV.js'] === OLD_APP && L.menuDraws >= 1 && L.error === '');
+  check('...and no card pops up for it', !anyText(L, /App update|Camera update|Up to date/));
+  // an app that is NEWER than the list (a development copy) is left alone
+  FC.reset();
+  L = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor({ app: '2.0.0', fw: '2.1.0' }), keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('an app newer than the list is never "downgraded"', L.webUrls.length === 1 && L.writes === 0);
+  // not on a home WiFi: it must not touch the internet
+  FC.reset();
+  L = runApp({ preconnected: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor(), keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('on the camera\'s WiFi it never goes looking for updates', L.webUrls.length === 0 && L.menuDraws >= 1);
+  FC.reset();
+  L = runApp({ files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor(), keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('with no WiFi at all it does not ask Bruce to connect, and does not nag', L.webUrls.length === 0 && L.dialogs === 0 && L.joins === 0 && L.menuDraws >= 1);
+  // no internet / a broken list: silent
+  FC.reset();
+  L = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor({ listFails: true }), keys: script([{ when: MENU(1), key: 'esc' }]) });
+  check('no internet at start: silent, straight to the menu', L.error === '' && L.menuDraws >= 1 && !anyText(L, /No update info/) && L.writes === 0);
+};
+
+SCENARIOS.update_camera = function () {
+  var cam = webFor({ app: '2.1.0', fw: '2.2.0' });
+  var steps = [
+    { when: function (l) { return anyText(l, /Check and update it now/); }, key: 'sel' },
+    { when: function (l) { return anyText(l, /Update camera\?/) || has(l.titles, 'Update camera?'); }, key: 'sel' },
+    { when: function (l) { return has(l.titles, 'Camera updated') || has(l.titles, 'Not updated'); }, key: 'sel' },
+    { when: MENU(1), key: 'esc' }
+  ];
+  FC.reset({ fw: '2.1.0', newFw: '2.2.0' });
+  var L = runApp({ homeWifi: true, typed: [SSID, PASSWORD], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script(steps) });
+  var saved = null;
+  try { saved = JSON.parse(L.files['/MiniCCTV.cfg']); } catch (e) { saved = null; }
+  var req = FC.state().otaReq;
+  check('app ran without throwing', L.error === '' && !L.timeout, L.error);
+  check('it offers the camera update when the list has a newer camera than the one it knows', anyText(L, /Camera v2\.1\.0\s+->\s+v2\.2\.0/));
+  check('the Stick left the home WiFi, joined the camera, lost it while it updated, and rejoined', L.netLog.join(',') === 'none,cam,none,cam', L.netLog.join(','));
+  check('it asked for the WiFi name (pre-filled with the last one) and then the password (masked)', L.prompts.length === 2 && L.prompts[0].initial === 'OldHome' && /name/i.test(L.prompts[0].msg) && L.prompts[0].mask === false && /password/i.test(L.prompts[1].msg) && L.prompts[1].mask === true, JSON.stringify(L.prompts));
+  check('the camera received exactly what was typed, decoded (special characters survive)', req !== null && req.ssid === SSID && req.pass === PASSWORD, JSON.stringify(req));
+  check('the details went to the camera, once, by POST over its own network', FC.state().otaCalls === 1 && countUrls(L, /\/ota$/) === 1);
+  check('the screen counted the wait and then said the camera was updated', anyText(L, /Waiting \d+ s/) && anyText(L, /Camera firmware is now/) && anyText(L, /^v2\.2\.0\.$/));
+  check('the Stick remembers the camera is now 2.2.0 and the WiFi NAME, and clears the camera\'s note', saved !== null && saved.camFw === '2.2.0' && saved.homeSsid === SSID && FC.state().otamsg === '');
+  check('the password is never saved, shown or kept anywhere', noSecrets(L));
+  check('the Stick never downloads firmware itself (the camera does)', countText({ texts: L.webUrls }, /\.bin/) === 0 && L.webUrls.length === 1);
+  check('the main menu follows', L.menuDraws >= 1);
+
+  // the camera could not join the home WiFi
+  FC.reset({ fw: '2.1.0', updOk: false });
+  L = runApp({ homeWifi: true, typed: [SSID, 'wrongpass'], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script(steps) });
+  saved = JSON.parse(L.files['/MiniCCTV.cfg']);
+  check('a camera that could not join the WiFi says why, and nothing is marked as updated', anyText(L, /Not updated/i) && anyText(L, /home WiFi failed: check the name/) && saved.camFw === '2.1.0', JSON.stringify(saved));
+
+  // the camera is already the latest
+  FC.reset({ fw: '2.2.0' });
+  L = runApp({ homeWifi: true, typed: [SSID, 'x'], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([steps[0], { when: function (l) { return has(l.titles, 'Camera current'); }, key: 'sel' }, steps[3]]) });
+  check('a camera that is already current says so and asks for nothing', anyText(L, /is the latest/) && L.prompts.length === 0 && FC.state().otaCalls === 0 && JSON.parse(L.files['/MiniCCTV.cfg']).camFw === '2.2.0');
+
+  // later, skipped, or cancelled: nothing is sent
+  FC.reset({ fw: '2.1.0' });
+  L = runApp({ homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([{ when: function (l) { return anyText(l, /Check and update it now/); }, key: 'prev' }, { when: MENU(1), key: 'esc' }]) });
+  check('UP at "update now?" leaves the camera alone and goes to the menu', L.netLog.length === 0 && FC.state().otaCalls === 0 && L.menuDraws >= 1);
+  FC.reset({ fw: '2.1.0' });
+  L = runApp({ homeWifi: true, typed: [], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([steps[0], steps[1], { when: MENU(1), key: 'esc' }]) });
+  check('escaping the WiFi name prompt cancels without sending anything', FC.state().otaCalls === 0 && L.prompts.length === 1 && L.menuDraws >= 1);
+  FC.reset({ fw: '2.1.0' });
+  L = runApp({ homeWifi: true, typed: [SSID, ''], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([steps[0], steps[1], { when: function (l) { return anyText(l, /open\s*$/) || anyText(l, /network with no password/); }, key: 'prev' }, { when: MENU(1), key: 'esc' }]) });
+  check('an empty password is double-checked, and cancelling sends nothing', FC.state().otaCalls === 0 && anyText(L, /network with no password/));
+  FC.reset({ fw: '2.1.0' });
+  L = runApp({ homeWifi: true, typed: ['OpenCafe', ''], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([steps[0], steps[1], { when: function (l) { return anyText(l, /network with no password/); }, key: 'sel' }, steps[2], steps[3]]) });
+  check('...but confirming an open network goes ahead with an empty password', FC.state().otaReq !== null && FC.state().otaReq.ssid === 'OpenCafe' && FC.state().otaReq.pass === '');
+
+  // trouble
+  FC.reset({ fw: '2.1.0', down: true });
+  L = runApp({ homeWifi: true, typed: [SSID, 'x'], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, keys: script([steps[0], { when: function (l) { return has(l.titles, 'Camera not found'); }, key: 'prev' }, steps[3]]) });
+  check('a camera that is off is reported, and the app carries on', anyText(L, /powered on/) && FC.state().otaCalls === 0 && L.menuDraws >= 1 && L.error === '');
+  FC.reset({ fw: '2.1.0', updGone: 99999 });
+  L = runApp({ homeWifi: true, typed: [SSID, 'x'], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, maxTicks: 400000, keys: script([steps[0], steps[1], { when: function (l) { return has(l.titles, 'No answer yet'); }, key: 'sel' }, steps[3]]) });
+  check('a camera that never comes back: the wait ends by itself with an explanation', anyText(L, /may still be busy/) && L.error === '' && !L.timeout && L.menuDraws >= 1);
+  FC.reset({ fw: '2.1.0', updGone: 99999 });
+  L = runApp({ homeWifi: true, typed: [SSID, 'x'], files: { '/MiniCCTV.cfg': CFG_NOW }, web: cam, maxTicks: 400000, keys: script([steps[0], steps[1], { when: function (l) { return anyText(l, /Waiting [3-9] s/); }, key: 'prev' }, steps[3]]) });
+  check('UP stops waiting at once', !anyText(L, /may still be busy/) && L.menuDraws >= 1 && !anyText(L, /Waiting 1\d\d s/));
+  check('the password is not kept in any of the failure paths either', noSecrets(L));
+};
+
+SCENARIOS.update_in_settings = function () {
+  FC.reset({ fw: '2.1.0' });
+  // from the camera's WiFi: Settings -> Updates asks to pick the home WiFi, then reports
+  var L = runApp({
+    preconnected: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor({ app: '2.1.0', fw: '2.1.0' }),
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },   // Alerts(1) -> Updates(7)
+      { when: null, key: 'sel' },
+      { when: function (l) { return has(l.titles, 'Join home WiFi'); }, key: 'sel' },
+      { when: function (l) { return has(l.titles, 'Up to date'); }, key: 'sel' },
+      { when: null, key: 'next' },                                              // App
+      { when: null, key: 'sel' },                                               // says its version
+      { when: function (l) { return anyText(l, /Stick app v2\.1\.0/); }, key: 'next' },
+      { when: null, key: 'sel' },                                               // Camera version (not seen yet: connects)
+      { when: function (l) { return anyText(l, /Camera firmware v2\.1\.0/); }, key: 'esc' },
+      { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('app ran without throwing', L.error === '', L.error);
+  check('Updates from the camera\'s WiFi offers Bruce\'s WiFi picker, then looks at GitHub', L.dialogs === 1 && L.webUrls.length === 1 && anyText(L, /Up to date/i) && anyText(L, /Camera v2\.1\.0/), '(dialogs ' + L.dialogs + ', web ' + L.webUrls.length + ', last texts: ' + L.texts.slice(-12).join(' | ') + ')');
+  check('the rows show both versions as chips', L.texts.indexOf('V2.1.0') >= 0 && anyText(L, /^App$/) && anyText(L, /^Camera$/));
+  check('the Updates row reports "Current" once it has looked', L.texts.indexOf('CURRENT') >= 0);
+  check('the app row says its version and where the newest is', anyText(L, /Stick app v2\.1\.0/) && anyText(L, /Latest on GitHub: v2\.1\.0/));
+
+  // a newer app found by hand installs, then the app ends
+  FC.reset({ fw: '2.1.0' });
+  L = runApp({
+    homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': OLD_APP }, web: webFor({ app: '2.2.0', fw: '2.1.0' }),
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+      { when: null, key: 'sel' },                                               // Updates (already on the home WiFi: no picker)
+      { when: function (l) { return anyText(l, /App updated/); }, key: 'sel' }
+    ]))
+  });
+  check('Updates by hand on the home WiFi installs a newer app and ends the app', L.error === '' && L.dialogs === 0 && L.files['/BruceJS/MiniCCTV.js'] === NEW_APP && L.files['/BruceJS/MiniCCTV.js.bak'] === OLD_APP);
+
+  // no internet when asked by hand: it says so
+  FC.reset();
+  L = runApp({
+    homeWifi: true, files: { '/MiniCCTV.cfg': CFG_NOW }, web: webFor({ listFails: true }),
+    keys: script(toSettings().concat([
+      { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' }, { when: null, key: 'next' },
+      { when: null, key: 'sel' },
+      { when: function (l) { return has(l.titles, 'No update info'); }, key: 'sel' },
+      { when: null, key: 'esc' }, { when: MENU(2), key: 'esc' }
+    ]))
+  });
+  check('asked by hand with no internet, it explains instead of failing silently', anyText(L, /Could not read the update list/) && L.error === '');
+};
+
+SCENARIOS.update_footprint = function () {
+  // Used by tools/mq_footprint.js, which shrinks the engine's heap until this stops working: installing
+  // a real-sized (63 KB) app update is the most memory the app ever needs at once.
+  var f = '';
+  for (var i = 0; i < 2300; i++) {
+    f += '// padding padding padding\n';
+  }
+  var big = '// MiniCCTV 2.2.0\n' + f + 'var APP_VERSION = \'2.2.0\';\nmain();\n';
+  f = null; // the rig must hold one copy of the download (standing in for the one on the Stick), not two
+  FC.reset();
+  var L = runApp({
+    light: true, homeWifi: true,
+    files: { '/MiniCCTV.cfg': CFG_NOW, '/BruceJS/MiniCCTV.js': '// old\nvar APP_VERSION = \'2.1.0\';\nmain();\n' },
+    web: webFor({ text: big, size: big.length }),
+    keys: script([{ when: function (l) { return l.files['/BruceJS/MiniCCTV.js.bak'] !== undefined; }, key: 'sel' }])
+  });
+  check('a 63 KB update was installed', L.error === '' && L.files['/BruceJS/MiniCCTV.js'] === big, L.error);
 };
 
 SCENARIOS.tables_match_firmware = function () {

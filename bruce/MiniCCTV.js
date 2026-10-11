@@ -18,6 +18,11 @@
 // the person box and sharpening. Alerts and the info line are kept in /MiniCCTV.cfg on the Stick; the
 // rest is stored on the camera.
 //
+// Updates (see "updates" below): with the Stick on your home WiFi, the app checks GitHub when it
+// starts, replaces itself if there is a newer version, and can update the camera too. For the camera
+// you type your home WiFi name and password on the Stick; they go to the camera over its own network,
+// are never saved, and the camera downloads its firmware straight from GitHub.
+//
 // Nothing on screen flashes or blinks. The picture is always sent as 8-bit bands that are drawn in
 // place (Bruce's JPEG drawing blanks its area to black first, which shows as blinking, so it is not
 // used), and the app never fills the screen with a bright colour.
@@ -52,6 +57,11 @@ var CFG_FILE = { fs: 'littlefs', path: '/MiniCCTV.cfg' }; // the Stick's own set
 // ----------------------------------------------------------------------------
 
 var APP_NAME = 'MiniCCTV';
+var APP_VERSION = '2.1.0'; // bumped by tools/release.sh; the camera reports its own (FW_VERSION in config.h)
+var UPDATE_BASE = 'https://raw.githubusercontent.com/udaydotoffical-svg/mini-cctv/main/';
+var UPDATE_URL = UPDATE_BASE + 'dist/version.json'; // the list of the latest versions
+var AUTO_UPDATE = true; // check for updates at start when the Stick is on a non-camera WiFi
+var CAM_UPDATE_WAIT_MS = 240000; // how long to wait for the camera to come back after an update
 
 // must match firmware/mini_cctv/modes.h and filters.h
 var MODES = ['Live', 'Guard', 'Security', 'Continuous', 'Timelapse'];
@@ -107,9 +117,9 @@ var C = {
   bad: display.color(255, 77, 109)
 };
 
-var cam = { mode: 2, sd: 1, rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1, free: 0, hist: 0, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '' };
+var cam = { fw: '', mode: 2, sd: 1, rec: 0, box: 1, sharp: 1, z: 10, px: 50, py: 50, f: 0, n: 0, fl: 1, mi: 0, br: 1, auto: 1, free: 0, hist: 0, tl: 60, ov: 0, ago: 0, play: 0, cpos: 0, clen: 0, name: '' };
 var camSeen = false; // true once the camera has answered, so `cam` holds real values
-var cfg = { alerts: 2, hud: true }; // the Stick's saved defaults
+var cfg = { alerts: 2, hud: true, camFw: '', homeSsid: '' }; // the Stick's saved defaults (never the WiFi password)
 var hud = true;
 var alertLevel = 2;
 var since = 0; // last picture update we have fully drawn
@@ -123,6 +133,7 @@ var toastLift = 0; // pixels to raise toasts (the camera screen keeps its shutte
 var lastIrAt = 0;
 var menuMseq = -1;
 var badSize = '';
+var latest = null; // the newest versions GitHub listed, once we have asked
 var recShown = 0; // which overlay chips are on the picture right now (so they get erased)
 var noSdShown = 0;
 
@@ -179,11 +190,17 @@ function loadCfg() {
   if (o.hud === 0 || o.hud === 1) {
     cfg.hud = o.hud === 1;
   }
+  if (typeof o.camFw === 'string' && verNum(o.camFw) >= 0) {
+    cfg.camFw = o.camFw; // the camera firmware we last saw
+  }
+  if (typeof o.homeSsid === 'string' && o.homeSsid.length <= 32) {
+    cfg.homeSsid = o.homeSsid; // to pre-fill the next update; the password is never stored
+  }
 }
 
 function saveCfg() {
   try {
-    storage.write(CFG_FILE, JSON.stringify({ v: 3, alerts: cfg.alerts, hud: cfg.hud ? 1 : 0 }), 'write');
+    storage.write(CFG_FILE, JSON.stringify({ v: 4, alerts: cfg.alerts, hud: cfg.hud ? 1 : 0, camFw: cfg.camFw, homeSsid: cfg.homeSsid }), 'write');
   } catch (e) {
     lastErr = 'save ' + e;
   }
@@ -599,6 +616,10 @@ function ctl(q) {
   if (b) {
     cam = b;
     camSeen = true;
+    if (typeof b.fw === 'string' && b.fw !== cfg.camFw && verNum(b.fw) >= 0) {
+      cfg.camFw = b.fw;
+      saveCfg();
+    }
   }
   return b;
 }
@@ -1626,6 +1647,383 @@ function cameraMenu() {
   );
 }
 
+// ------------------------------- updates -----------------------------------
+// "2.10.3" -> 2010003, or -1 if it is not major.minor.patch (each part 0..999). Same rules as the camera's.
+function verNum(v) {
+  if (typeof v !== 'string') {
+    return -1;
+  }
+  var p = v.split('.');
+  if (p.length !== 3) {
+    return -1;
+  }
+  var n = 0;
+  for (var i = 0; i < 3; i++) {
+    if (!/^[0-9]{1,3}$/.test(p[i])) {
+      return -1;
+    }
+    n = n * 1000 + parseInt(p[i], 10);
+  }
+  return n;
+}
+
+// Is version a newer than version b? An unreadable b counts as older than anything readable, and
+// nothing is newer than an unreadable a.
+function newer(a, b) {
+  var x = verNum(a);
+  var y = verNum(b);
+  if (x < 0) {
+    return false;
+  }
+  return y < 0 ? true : x > y;
+}
+
+// URL-encodes text for a form body (Bruce's JS has no encodeURIComponent). Non-ASCII becomes UTF-8.
+function urlEncode(str) {
+  var out = '';
+  var hex = '0123456789ABCDEF';
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    var ch = str.charAt(i);
+    if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || ch === '-' || ch === '_' || ch === '.' || ch === '~') {
+      out += ch;
+      continue;
+    }
+    var bytes = [];
+    if (c < 128) {
+      bytes.push(c);
+    } else if (c < 2048) {
+      bytes.push(192 | (c >> 6), 128 | (c & 63));
+    } else {
+      bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+    }
+    for (var j = 0; j < bytes.length; j++) {
+      out += '%' + hex.charAt(bytes[j] >> 4) + hex.charAt(bytes[j] & 15);
+    }
+  }
+  return out;
+}
+
+// The list of the latest versions, or null. Only accepts the fields we use, from our own repository.
+function fetchLatest() {
+  var m = null;
+  try {
+    var r = wifi.httpFetch(UPDATE_URL, { responseType: 'json' });
+    if (!r || r.status !== 200 || !r.body) {
+      lastErr = 'http ' + (r ? r.status : 0);
+      return null;
+    }
+    m = r.body;
+  } catch (e) {
+    lastErr = 'net ' + e;
+    return null;
+  }
+  if (typeof m.app !== 'string' || verNum(m.app) < 0 || typeof m.app_url !== 'string' || m.app_url.indexOf(UPDATE_BASE) !== 0) {
+    lastErr = 'bad update list';
+    return null;
+  }
+  if (typeof m.app_size !== 'number' || m.app_size < 1000 || m.app_size > 400000) {
+    lastErr = 'bad update list';
+    return null;
+  }
+  if (typeof m.fw !== 'string' || verNum(m.fw) < 0) {
+    m.fw = '';
+  }
+  return m;
+}
+
+// Where this script lives: the SD card or the Stick's own flash.
+function selfDir() {
+  var i = __filepath.lastIndexOf('/');
+  return i > 0 ? __filepath.substring(0, i) : '/';
+}
+
+function selfFs() {
+  try {
+    var names = storage.readdir({ fs: 'sd', path: selfDir() });
+    var base = __filepath.substring(__filepath.lastIndexOf('/') + 1);
+    if (names.indexOf(base) >= 0) {
+      return 'sd';
+    }
+  } catch (e) {
+    lastErr = 'readdir ' + e;
+  }
+  return 'littlefs';
+}
+
+// Size of a file, from the folder listing (so it is never loaded into memory). -1 if it is not there.
+function fileSize(fs, path) {
+  var i = path.lastIndexOf('/');
+  try {
+    var list = storage.readdir({ fs: fs, path: i > 0 ? path.substring(0, i) : '/' }, { withFileTypes: true });
+    for (var k = 0; k < list.length; k++) {
+      if (list[k].name === path.substring(i + 1)) {
+        return list[k].size;
+      }
+    }
+  } catch (e) {
+    lastErr = 'size ' + e;
+  }
+  return -1;
+}
+
+function removeQuiet(f) {
+  try {
+    storage.remove(f);
+  } catch (e) {
+    lastErr = 'remove ' + e;
+  }
+}
+
+// Downloads the new app next to the old one, checks it, then swaps the files, keeping the old one as
+// MiniCCTV.js.bak. Returns '' on success or a short reason; the running app is only replaced if every
+// check passed, and a failed swap puts the old file back.
+function installApp(m) {
+  if (typeof __filepath !== 'string' || __filepath === '') {
+    return 'unknown app path';
+  }
+  var fs = selfFs();
+  var here = { fs: fs, path: __filepath };
+  var tmp = { fs: fs, path: __filepath + '.new' };
+  var bak = { fs: fs, path: __filepath + '.bak' };
+  var r;
+  try {
+    r = wifi.httpFetch(m.app_url);
+  } catch (e) {
+    return 'download failed';
+  }
+  if (!r || r.status !== 200 || typeof r.body !== 'string') {
+    return 'download failed (' + (r ? r.status : 0) + ')';
+  }
+  var body = r.body;
+  if (body.length !== m.app_size || r.length !== m.app_size) {
+    return 'size does not match';
+  }
+  if (body.indexOf("var APP_VERSION = '" + m.app + "';") < 0 || body.lastIndexOf('main();') < body.length - 12) {
+    return 'file is not MiniCCTV ' + m.app;
+  }
+  var ok = false;
+  try {
+    ok = storage.write(tmp, body, 'write') === true;
+  } catch (e2) {
+    ok = false;
+  }
+  body = null; // the download is on the card now: free it before looking at the file again
+  r = null;
+  gc();
+  if (ok) {
+    ok = fileSize(fs, __filepath + '.new') === m.app_size; // what we wrote is what we expected
+  }
+  if (!ok) {
+    removeQuiet(tmp);
+    return 'could not save it';
+  }
+  removeQuiet(bak);
+  var moved = false;
+  try {
+    moved = storage.rename(here, __filepath + '.bak') === true;
+  } catch (e3) {
+    moved = false;
+  }
+  if (!moved) {
+    removeQuiet(tmp);
+    return 'could not replace the app';
+  }
+  var placed = false;
+  try {
+    placed = storage.rename(tmp, __filepath) === true;
+  } catch (e4) {
+    placed = false;
+  }
+  if (!placed) {
+    try {
+      storage.rename(bak, __filepath); // put the old one back
+    } catch (e5) {
+      lastErr = 'restore ' + e5;
+    }
+    removeQuiet(tmp);
+    return 'could not replace the app';
+  }
+  return '';
+}
+
+// The camera: joins it, compares versions, takes the home WiFi name and password, asks the camera to
+// update, then waits for it to come back. Returns '' (or 'quit' if the whole app should end).
+function updateCamera(m, manual) {
+  var k;
+  msgScreen('Camera', ['Reaching the camera...'], ['UP+DN quit'], '');
+  wifi.disconnect();
+  delay(300);
+  var why = connectCam();
+  if (why !== '') {
+    msgScreen('Camera not found', ['Is it powered on and close?', 'Updates need the camera on.'], ['UP back'], 'err');
+    k = waitKey(0);
+    return k === 'esc' ? 'quit' : '';
+  }
+  if (!newer(m.fw, cam.fw)) {
+    msgScreen('Camera current', ['Camera firmware v' + cam.fw, 'is the latest.'], ['M5 ok'], 'ok');
+    k = waitKey(0);
+    return k === 'esc' ? 'quit' : '';
+  }
+  msgScreen('Update camera?', ['v' + (cam.fw === '' ? '?' : cam.fw) + '  ->  v' + m.fw, 'Next: your home WiFi name and', 'password (not saved).'], ['M5 go', 'UP later'], '');
+  k = waitKey(0);
+  if (k === 'esc') {
+    return 'quit';
+  }
+  if (k !== 'sel') {
+    return '';
+  }
+  var ssid = keyboard.keyboard(cfg.homeSsid, 32, 'Home WiFi name');
+  if (ssid === '') {
+    return '';
+  }
+  var pass = keyboard.keyboard('', 63, 'Home WiFi password', true);
+  if (pass === '') {
+    msgScreen('No password?', ['Is "' + clip(ssid, 20) + '" an open', 'network with no password?'], ['M5 yes', 'UP cancel'], '');
+    k = waitKey(0);
+    if (k !== 'sel') {
+      return k === 'esc' ? 'quit' : '';
+    }
+  }
+  if (ssid !== cfg.homeSsid) {
+    cfg.homeSsid = ssid;
+    saveCfg();
+  }
+  msgScreen('Camera', ['Sending the WiFi details...'], null, '');
+  var res = null;
+  try {
+    res = wifi.httpFetch(CAM_HOST + '/ota', { method: 'POST', body: 'ssid=' + urlEncode(ssid) + '&pass=' + urlEncode(pass), responseType: 'json' });
+  } catch (e) {
+    res = null;
+  }
+  pass = '';
+  if (!res || res.status !== 200 || !res.body || res.body.ok !== 1) {
+    msgScreen('Camera said no', [clip(res && res.body && res.body.msg ? res.body.msg : 'no answer', 33)], ['UP back'], 'err');
+    k = waitKey(0);
+    return k === 'esc' ? 'quit' : '';
+  }
+  var t0 = now();
+  var lastTry = 0;
+  var lastDraw = 0;
+  var st = null;
+  while (now() - t0 < CAM_UPDATE_WAIT_MS) {
+    k = readKey();
+    if (k === 'prev' || k === 'esc') {
+      return k === 'esc' ? 'quit' : '';
+    }
+    var t = now();
+    if (t - lastDraw >= 1000) {
+      lastDraw = t;
+      msgScreen('Updating', ['The camera left its WiFi to', 'download v' + m.fw + '. About a minute.', 'Waiting ' + Math.floor((t - t0) / 1000) + ' s'], ['UP stop waiting'], '');
+    }
+    if (t - t0 > 8000 && t - lastTry >= 4000) {
+      lastTry = t;
+      if (!onCamNetwork()) {
+        wifi.connect(CAM_SSID, 6, CAM_PASS);
+      }
+      st = getJson('/status');
+      if (st && st.ota === 0) {
+        break;
+      }
+      st = null;
+    }
+    delay(100);
+  }
+  if (!st) {
+    msgScreen('No answer yet', ['The camera may still be busy.', 'Wait a minute and open the', 'app again.'], ['UP back'], 'err');
+    k = waitKey(0);
+    return k === 'esc' ? 'quit' : '';
+  }
+  var said = typeof st.otamsg === 'string' ? st.otamsg : '';
+  var good = said.indexOf('updated to') === 0;
+  getJson('/ctl?otaclr=1');
+  ctl('');
+  if (good) {
+    msgScreen('Camera updated', ['Camera firmware is now', 'v' + (typeof st.fw === 'string' ? st.fw : m.fw) + '.'], ['M5 ok'], 'ok');
+  } else {
+    msgScreen('Not updated', [clip(said === '' ? 'no result from the camera' : said, 33), 'Camera firmware v' + (typeof st.fw === 'string' ? st.fw : '?')], ['M5 ok'], 'err');
+  }
+  k = waitKey(0);
+  return k === 'esc' ? 'quit' : '';
+}
+
+// Checks GitHub for newer versions and installs them. manual = asked from Settings (always says what
+// it found); otherwise it runs at start and stays quiet unless there is something to do. The camera is
+// only visited if the list has a newer firmware than the one the Stick last saw on it (or it never saw one).
+// Returns 'quit' when the app replaced itself or the user quit, otherwise ''.
+function checkUpdates(manual) {
+  msgScreen('Updates', ['Checking GitHub...'], null, '');
+  var m = fetchLatest();
+  if (!m) {
+    if (manual) {
+      msgScreen('No update info', ['Could not read the update list.', clip(lastErr, 33)], ['UP back'], 'err');
+      return waitKey(0) === 'esc' ? 'quit' : '';
+    }
+    return '';
+  }
+  latest = m;
+  var k;
+  if (newer(m.app, APP_VERSION)) {
+    msgScreen('App update', ['v' + APP_VERSION + '  ->  v' + m.app, 'Installing in 3 s.'], ['UP skip'], '');
+    k = waitKey(3000);
+    if (k === 'esc') {
+      return 'quit';
+    }
+    if (k === '') {
+      msgScreen('App update', ['Downloading v' + m.app + '...'], null, '');
+      var why = installApp(m);
+      if (why === '') {
+        msgScreen('App updated', ['Now v' + m.app + '. Open MiniCCTV', 'again to use it.'], ['M5 ok'], 'ok');
+        waitKey(0);
+        return 'quit';
+      }
+      msgScreen('Update failed', [clip(why, 33), 'The current app is unchanged.'], ['M5 ok'], 'err');
+      if (waitKey(0) === 'esc') {
+        return 'quit';
+      }
+    }
+  }
+  if (m.fw !== '' && (cfg.camFw === '' || newer(m.fw, cfg.camFw))) {
+    if (!manual) {
+      msgScreen('Camera update', ['Camera v' + (cfg.camFw === '' ? '?' : cfg.camFw) + '  ->  v' + m.fw, 'Check and update it now?'], ['M5 yes', 'UP later'], '');
+      k = waitKey(0);
+      if (k === 'esc') {
+        return 'quit';
+      }
+      if (k !== 'sel') {
+        return '';
+      }
+    }
+    return updateCamera(m, manual);
+  }
+  if (manual) {
+    msgScreen('Up to date', ['App v' + APP_VERSION, 'Camera v' + (cfg.camFw === '' ? '?' : cfg.camFw)], ['M5 ok'], 'ok');
+    return waitKey(0) === 'esc' ? 'quit' : '';
+  }
+  return '';
+}
+
+// Settings -> Updates: the Stick must be on a WiFi with internet, so offer Bruce's own WiFi picker.
+function runUpdates() {
+  if (!wifi.connected() || onCamNetwork()) {
+    msgScreen('Join home WiFi', ['Updates come from GitHub, so', 'the Stick needs the internet.'], ['M5 pick WiFi', 'UP back'], '');
+    var k = waitKey(0);
+    if (k === 'esc') {
+      return 'quit';
+    }
+    if (k !== 'sel') {
+      return '';
+    }
+    wifi.disconnect();
+    delay(300);
+    if (!wifi.connectDialog()) {
+      msgScreen('Not connected', ['No WiFi, so no update check.'], ['UP back'], 'err');
+      return waitKey(0) === 'esc' ? 'quit' : '';
+    }
+  }
+  return checkUpdates(true);
+}
+
 // ------------------------------- settings ----------------------------------
 // What the app and the camera start with. The Stick's own choices live in /MiniCCTV.cfg; auto-record,
 // the camera mode and the timelapse interval are saved by the camera itself.
@@ -1638,6 +2036,9 @@ function settingsItems() {
     item('Timelapse', camSeen ? tlName(cam.tl) : '...'),
     item('Person box', camSeen ? (cam.box ? 'On' : 'Off') : '...'),
     item('Sharpen', camSeen ? (cam.sharp ? 'On' : 'Off') : '...'),
+    item('Updates', latest ? (newer(latest.app, APP_VERSION) || (latest.fw !== '' && newer(latest.fw, cfg.camFw)) ? 'New' : 'Current') : 'Check'),
+    item('App', 'v' + APP_VERSION),
+    item('Camera', cfg.camFw === '' ? '...' : 'v' + cfg.camFw),
     item('Back', '', 'back')
   ];
 }
@@ -1663,6 +2064,15 @@ function settingsHint(sel) {
   }
   if (sel === 6) {
     return 'Crisper edges in the live picture.';
+  }
+  if (sel === 7) {
+    return 'Check GitHub for a newer app or camera.';
+  }
+  if (sel === 8) {
+    return latest ? 'Latest on GitHub: v' + latest.app : 'The Stick app (this program).';
+  }
+  if (sel === 9) {
+    return latest && latest.fw !== '' ? 'Latest on GitHub: v' + latest.fw : 'The camera firmware.';
   }
   return NAV;
 }
@@ -1690,8 +2100,15 @@ function settingsSelect(i) {
     saveCfg();
     return '';
   }
-  if (i === 7) {
+  if (i === 10) {
     return 'back';
+  }
+  if (i === 7) {
+    return runUpdates() === 'quit' ? 'quit' : '';
+  }
+  if (i === 8) {
+    notice('Stick app v' + APP_VERSION, '');
+    return '';
   }
   c = needCamera();
   if (c === 'quit') {
@@ -1712,8 +2129,11 @@ function settingsSelect(i) {
     r = cam;
   } else if (i === 5) {
     r = ctl('box=' + (cam.box ? 0 : 1));
-  } else {
+  } else if (i === 6) {
     r = ctl('sh=' + (cam.sharp ? 0 : 1));
+  } else {
+    r = cam;
+    notice('Camera firmware v' + (cam.fw === '' ? '?' : cam.fw), '');
   }
   if (!r) {
     notice('Camera not answering', 'err');
@@ -1827,11 +2247,21 @@ function mainSelect(i) {
   return 'quit';
 }
 
+// At start, on a WiFi that is not the camera's, look for updates (quietly if there are none).
+function autoUpdate() {
+  if (!AUTO_UPDATE || typeof __filepath !== 'string' || !wifi.connected() || onCamNetwork()) {
+    return '';
+  }
+  return checkUpdates(false);
+}
+
 function main() {
   loadCfg();
   alertLevel = cfg.alerts;
   hud = cfg.hud;
-  runMenu(APP_NAME, mainLabels, mainHint, mainSelect, 'quit', menuIdle);
+  if (autoUpdate() !== 'quit') {
+    runMenu(APP_NAME, mainLabels, mainHint, mainSelect, 'quit', menuIdle);
+  }
   display.restoreBrightness();
   display.fill(0);
 }

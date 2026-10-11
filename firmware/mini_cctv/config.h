@@ -111,3 +111,11 @@
 #define BOX_HOLD_MS  400   // keep showing a box this long after the last frame that had one
 
 #define SHARPEN_DEFAULT 1  // mild sharpening of the picture sent to the Stick (Settings -> Sharpen)
+
+// ---- over-the-air update (the Stick's Settings -> Updates). The camera only ever downloads from this
+// fixed place; it takes nothing but the home WiFi name and password from the Stick.
+#define FW_VERSION         "2.1.0"
+#define OTA_URL_PREFIX     "https://raw.githubusercontent.com/udaydotoffical-svg/mini-cctv/main/dist/"
+#define OTA_MANIFEST_URL   OTA_URL_PREFIX "version.json"
+#define OTA_MAX_IMAGE      3000000  // the app partitions are 3 MB
+#define OTA_WIFI_TIMEOUT_MS 25000

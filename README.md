@@ -100,8 +100,28 @@ Main menu → **Settings**. Changes apply straight away and are remembered.
 | **Timelapse** | 10 s, 30 s, 1 m, 5 m, 15 m, 1 h | on the camera |
 | **Person box** | On / Off: draw a box around whatever is moving, **red** if it is person-sized, **cyan** for anything else. Drawn by the camera into the picture, so it follows zoom and pan | on the camera |
 | **Sharpen** | On / Off: a mild sharpening before the picture is squeezed into 256 colours, for crisper edges | on the camera |
+| **Updates** | Check now: look for a newer app and camera on GitHub (see below) | |
+| **App** | The app's version, and the newest one it has seen | |
+| **Camera** | The camera's version, and the newest one it has seen | |
 
 The Stick's choices live in `/MiniCCTV.cfg` on its internal storage (a small JSON file; a damaged or out-of-range file is ignored and the defaults are used). The actions menu in the live viewer can still flip Info and Mode on the spot; the Info flip is for the current session, only Settings changes the default. The camera rows show `...` until the app has talked to the camera once; selecting one connects first. The Stick-side rows work with the camera off.
+
+### Updates (over the air)
+
+The app can update itself, and then the camera, from this repository. Nothing about your WiFi is hard-coded or stored: you type it on the Stick each time.
+
+1. Open the app while the Stick is on your home WiFi (join it from Bruce's WiFi menu first). On launch it reads `dist/version.json` from `main` on GitHub. If it can't (no WiFi, or it's on the camera's own network, `192.168.4.x`) it just carries on to the menu. **Settings → Updates → Check now** does the same by hand.
+2. **App:** if a newer `MiniCCTV.js` is announced, the app downloads it next to itself, checks it (exact size, the announced version, not cut off), keeps the old one as `MiniCCTV.js.bak`, swaps it in, and asks you to run the app again. If anything fails the old file is put back.
+3. **Camera:** if the camera is known to be older, the app asks to update it. You join the camera, type your **home WiFi name and password** with the Stick's keyboard, and the app sends them to the camera (`POST /ota`). The camera then **leaves its own network** (it vanishes from the Stick's WiFi list), joins your home WiFi, downloads `firmware-oceanlabz.bin` from this repository over HTTPS, checks its size and MD5, installs it and reboots. The app waits (up to 4 minutes) and shows the new version when the camera is back. The password is used once and never saved; only the network name is remembered, to save typing.
+4. **Settings → App** and **Settings → Camera** show both versions side by side, and whether newer ones exist.
+
+The camera only accepts an image that comes from this repository's fixed URL, is newer than what it runs, and matches the announced size (64 KB to 3 MB) and MD5. Home WiFi has to be WPA2-personal on 2.4 GHz.
+
+**First time only:** the update mechanism is in firmware 2.1.0 and the matching `MiniCCTV.js`, so you flash the camera once with the Arduino IDE and copy the app to the Stick once, by hand, as in Setup below. From then on updates are over the air.
+
+**Releasing (for the maintainer):** `tools/release.sh 2.2.0` sets the version in the app and the firmware, runs the tests, builds the camera image with `arduino-cli` (the Arduino IDE's toolchain, core 3.3.12), copies it to `dist/firmware-oceanlabz.bin` and writes `dist/version.json` (sizes, MD5, a hash of the firmware sources). `tools/check_release.js` (part of `tools/run_tests.sh`) fails if `dist/` doesn't match the sources, so a stale or hand-edited release can't be pushed. Any edit to `bruce/MiniCCTV.js` or `firmware/mini_cctv/` needs a new release.
+
+**Not yet tried on real hardware:** the logic is tested (the app on the real mquickjs engine with a fake network, the camera's version/manifest/URL parsing in C++, the firmware builds), but the HTTPS download from Bruce, the camera's TLS to GitHub, and the camera switching from access point to your WiFi and back have not been run on a real Stick and board. If an update fails the camera keeps running its current firmware and reports the reason in Settings → Camera. The camera's own WiFi password is still the default `12345678`; change it in `config.h` (and the app) if you care who joins.
 
 ### Buttons
 
@@ -161,7 +181,7 @@ Use a **FAT32** card (32 GB or smaller is simplest). The sketch uses the board's
 
 Copy `bruce/MiniCCTV.js` to `/BruceJS/` on the Stick's SD card, or upload it through the Bruce WebUI. It joins the camera's WiFi itself. The config block at the top must agree with `config.h` (SSID, password, `OUT_W`/`OUT_H`); if it doesn't, the app says so instead of drawing garbage. It needs a Bruce with the mquickjs interpreter (`drawJpg`/`drawBitmap` taking a `Uint8Array`, `httpFetch` with `responseType: 'binary'`).
 
-**Memory:** the app needs about 92 KB of the interpreter's heap when loaded (the pixel icons, the UI toolkit) and about 142 KB at peak while streaming. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
+**Memory:** the app needs about 109 KB of the interpreter's heap when loaded (the pixel icons, the UI toolkit, the updater) and about 162 KB at peak while streaming; replacing itself from a 63 KB download peaks around 164 KB. Bruce gives the interpreter about 250 KB on a Stick with PSRAM (every Stick Plus2) but only about 64 KB without, where it would not fit.
 
 ### Using your router instead
 
@@ -198,8 +218,8 @@ tools/run_tests.sh
 Needs g++, Python 3 with Pillow, and Node; ffmpeg and git/gcc/make are used if present. It runs:
 
 - **C++ tests under AddressSanitizer** (`tools/test_scaler.cpp`, `test_features.cpp`, `test_delta.cpp`, `test_avi.cpp`): scaling, dithering, change detection, zoom/pan, filters, motion detection, the DVR ring buffer, recording rules, the mode table, the band protocol and the AVI writer/reader. `ffprobe` and `ffmpeg` then independently check that a written clip is a valid MJPEG file that decodes and seeks.
-- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 27 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own. Settings get their own scenarios: auto-record, defaults saved and reloaded, damaged or out-of-range files, storage that throws, and the camera being off.
-- `node tools/mutate.js <golden_dir>` breaks the app 37 different ways, one at a time (including putting the flashing back), and checks that the suite notices each (it does: 37 of 37). A mutant that survives would mean a test that proves nothing.
+- **The Bruce app on two engines**: Node, and the **real mquickjs engine Bruce runs** (`tools/get_mqjs.sh` builds it from `BruceDevices/mquickjs`). 34 scripted scenarios drive the real menus with button presses against a fake camera (`tools/mq/fakecam.js`), with mocks that follow what Bruce's firmware really does. They cover every feature above, no SD card, connection and mid-stream failures, a rebooting camera, and replies produced by the real C++ encoder. The mode and filter tables are checked against the firmware's own. The updater has scenarios for every outcome (no WiFi, current, app update, bad or cut-off download, failed swap rolled back, camera update, the password handled safely, camera never coming back). Settings get their own scenarios: auto-record, defaults saved and reloaded, damaged or out-of-range files, storage that throws, and the camera being off.
+- `node tools/mutate.js <golden_dir>` breaks the app 54 different ways, one at a time (including putting the flashing back), and checks that the suite notices each (it does: 54 of 54). A mutant that survives would mean a test that proves nothing.
 - `node tools/ui_preview.js` renders the screens above to `docs/screens/` by running the real app against a software model of Bruce's display (the same 5x7 font and round-rect maths as TFT_eSPI). It also counts anything drawn off-screen.
 - `node tools/mq_footprint.js <mqjs>` measures the app's JS heap use on that engine.
 - `node tools/fake_cam_server.js` serves the fake camera over HTTP so a real Stick can be tried against a laptop (set `CAM_HOST` to the laptop and `JOIN_CAM_WIFI = false`).
